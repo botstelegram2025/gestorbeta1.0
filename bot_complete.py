@@ -6831,7 +6831,7 @@ def main_with_baileys():
         logger.info("🚀 Iniciando sistema Railway...")
         
         # Verificar se é ambiente Railway
-        is_railway = os.getenv('RAILWAY_ENVIRONMENT') or os.getenv('PORT' 3000)
+        is_railway = os.getenv('RAILWAY_ENVIRONMENT') or os.getenv('PORT')
         
         if is_railway:
             # Iniciar Baileys API em background
