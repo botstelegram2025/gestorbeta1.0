@@ -284,6 +284,68 @@ class MessageScheduler:
         except Exception as e:
             logger.error(f"Erro no envio diário às 9h: {e}")
     
+    def processar_todos_vencidos(self, forcar_reprocesso=False):
+        """Processa TODOS os clientes vencidos, mesmo os com mais de 1 dia (usado quando horário é alterado)"""
+        try:
+            logger.info("=== PROCESSAMENTO FORÇADO DE TODOS OS VENCIDOS ===")
+            logger.info("Enviando mensagens para todos os clientes vencidos...")
+            
+            # Buscar clientes ativos
+            clientes = self.db.listar_clientes(apenas_ativos=True)
+            
+            if not clientes:
+                logger.info("Nenhum cliente ativo encontrado")
+                return 0
+            
+            enviadas = 0
+            hoje = agora_br().date()
+            
+            for cliente in clientes:
+                try:
+                    vencimento = cliente['vencimento']
+                    dias_vencimento = (vencimento - hoje).days
+                    
+                    # Processar TODOS os clientes vencidos (independente de quantos dias)
+                    if dias_vencimento < 0:  # Qualquer cliente vencido
+                        dias_vencido = abs(dias_vencimento)
+                        
+                        # Verificar se já foi enviada hoje (evitar duplicatas)
+                        template = self.db.obter_template_por_tipo('vencimento_1dia_apos')
+                        if template and not forcar_reprocesso:
+                            if self._ja_enviada_hoje(cliente['id'], template['id']):
+                                logger.info(f"⏭️  {cliente['nome']} - mensagem já enviada hoje")
+                                continue
+                        
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_1dia_apos'):
+                            enviadas += 1
+                            logger.info(f"📧 Cobrança enviada: {cliente['nome']} (vencido há {dias_vencido} dias)")
+                        
+                    # Processar também os que vencem hoje/amanhã/depois de amanhã
+                    elif dias_vencimento == 0:
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_hoje'):
+                            enviadas += 1
+                            logger.info(f"🚨 Alerta enviado: {cliente['nome']} (vence hoje)")
+                            
+                    elif dias_vencimento == 1:
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias'):
+                            enviadas += 1
+                            logger.info(f"⏰ Lembrete enviado: {cliente['nome']} (vence amanhã)")
+                            
+                    elif dias_vencimento == 2:
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias'):
+                            enviadas += 1
+                            logger.info(f"⏰ Lembrete enviado: {cliente['nome']} (vence em 2 dias)")
+                        
+                except Exception as e:
+                    logger.error(f"Erro ao processar cliente {cliente['nome']}: {e}")
+            
+            logger.info(f"=== PROCESSAMENTO FORÇADO CONCLUÍDO: {enviadas} mensagens enviadas ===")
+            return enviadas
+            
+        except Exception as e:
+            logger.error(f"Erro no processamento forçado de vencidos: {e}")
+            return 0
+    
     def _enviar_mensagem_cliente(self, cliente, tipo_template):
         """Envia mensagem imediatamente para o cliente"""
         try:

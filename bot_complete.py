@@ -896,7 +896,8 @@ Use os botões abaixo para navegar:
                 else:
                     emoji_status = "🟢"
                 
-                cliente_texto = f"{emoji_status} {cliente['nome']} (ID:{cliente['id']})"
+                data_vencimento = cliente['vencimento'].strftime('%d/%m/%Y')
+                cliente_texto = f"{emoji_status} {cliente['nome']} ({data_vencimento})"
                 inline_keyboard.append([{
                     'text': cliente_texto,
                     'callback_data': f"cliente_detalhes_{cliente['id']}"
@@ -1927,7 +1928,8 @@ Verifique se:
                 else:
                     emoji_status = "🟢"
                 
-                cliente_texto = f"{emoji_status} {cliente['nome']} (ID:{cliente['id']})"
+                data_vencimento = cliente['vencimento'].strftime('%d/%m/%Y')
+                cliente_texto = f"{emoji_status} {cliente['nome']} ({data_vencimento})"
                 inline_keyboard.append([{
                     'text': cliente_texto,
                     'callback_data': f"cliente_detalhes_{cliente['id']}"
@@ -2211,7 +2213,8 @@ Exemplo: `15/12/2025`"""
                 else:
                     emoji_status = "🟢"
                 
-                cliente_texto = f"{emoji_status} {cliente['nome']} (ID:{cliente['id']})"
+                data_vencimento = cliente['vencimento'].strftime('%d/%m/%Y')
+                cliente_texto = f"{emoji_status} {cliente['nome']} ({data_vencimento})"
                 inline_keyboard.append([{
                     'text': cliente_texto,
                     'callback_data': f"cliente_detalhes_{cliente['id']}"

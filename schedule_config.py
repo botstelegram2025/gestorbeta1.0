@@ -178,8 +178,13 @@ Esta limpeza remove mensagens antigas da fila que não foram enviadas.
             # Salvar configuração no banco
             self.bot.db.salvar_configuracao('horario_envio', f'{novo_horario[:2]}:{novo_horario[2:]}')
             
-            # Recriar job de envio com novo horário usando o ID original
+            # IMPORTANTE: Processar todos os clientes vencidos agora que mudou o horário
             if hasattr(self.bot, 'scheduler') and self.bot.scheduler:
+                logger.info(f"Horário de envio alterado para {novo_horario[:2]}:{novo_horario[2:]} - processando todos os vencidos...")
+                
+                # Processar todos os clientes vencidos imediatamente
+                enviadas = self.bot.scheduler.processar_todos_vencidos(forcar_reprocesso=False)
+                
                 from apscheduler.triggers.cron import CronTrigger
                 
                 # Atualizar o job original com novo horário
@@ -192,6 +197,8 @@ Esta limpeza remove mensagens antigas da fila que não foram enviadas.
                 )
                 
                 mensagem = f"✅ Horário de envio alterado para {novo_horario[:2]}:{novo_horario[2:]}!\n\n"
+                if enviadas > 0:
+                    mensagem += f"📧 {enviadas} mensagens enviadas para clientes vencidos\n"
                 mensagem += f"📅 Próximo envio: {self._get_next_run_time('envio_diario_9h')}"
             else:
                 mensagem = "❌ Agendador não disponível."
@@ -213,8 +220,13 @@ Esta limpeza remove mensagens antigas da fila que não foram enviadas.
             # Salvar configuração no banco
             self.bot.db.salvar_configuracao('horario_verificacao', f'{novo_horario[:2]}:{novo_horario[2:]}')
             
-            # Recriar job de alerta admin com novo horário usando o ID original
+            # IMPORTANTE: Processar todos os clientes vencidos agora que mudou o horário
             if hasattr(self.bot, 'scheduler') and self.bot.scheduler:
+                logger.info(f"Horário de verificação alterado para {novo_horario[:2]}:{novo_horario[2:]} - processando todos os vencidos...")
+                
+                # Processar todos os clientes vencidos imediatamente
+                enviadas = self.bot.scheduler.processar_todos_vencidos(forcar_reprocesso=False)
+                
                 from apscheduler.triggers.cron import CronTrigger
                 
                 # Atualizar o job original com novo horário
@@ -227,6 +239,8 @@ Esta limpeza remove mensagens antigas da fila que não foram enviadas.
                 )
                 
                 mensagem = f"✅ Horário de verificação alterado para {novo_horario[:2]}:{novo_horario[2:]}!\n\n"
+                if enviadas > 0:
+                    mensagem += f"📧 {enviadas} mensagens enviadas para clientes vencidos\n"
                 mensagem += f"📅 Próxima verificação: {self._get_next_run_time('alerta_admin')}"
             else:
                 mensagem = "❌ Agendador não disponível."
