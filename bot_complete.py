@@ -9639,6 +9639,10 @@ def main_with_baileys():
             logger.info("🚂 Ambiente Railway detectado - aguardando PostgreSQL...")
             time.sleep(15)  # Aguardar PostgreSQL estar completamente pronto
         
+        # Registrar blueprint ANTES de iniciar Flask
+        app.register_blueprint(session_api)
+        logger.info("✅ API de sessão WhatsApp registrada")
+        
         # Iniciar Flask em thread separada para responder ao health check
         def start_flask():
             port = int(os.getenv('PORT', 5000))
@@ -9683,11 +9687,7 @@ def main_with_baileys():
         else:
             logger.warning("⚠️ Bot não inicializado completamente, mas servidor Flask será executado")
         
-        # Registrar blueprint da API de sessão WhatsApp
-        app.register_blueprint(session_api)
-        logger.info("✅ API de sessão WhatsApp registrada")
-        
-        # Flask já está rodando em thread separada
+        # Blueprint já foi registrado antes do Flask iniciar
         logger.info("✅ Todos os serviços inicializados - mantendo aplicação ativa")
         
         # Manter thread principal ativa
@@ -9727,9 +9727,10 @@ if __name__ == '__main__':
         else:
             logger.warning("⚠️ Bot não inicializado completamente, mas servidor Flask será executado")
         
-        # Registrar blueprint da API de sessão WhatsApp
-        app.register_blueprint(session_api)
-        logger.info("✅ API de sessão WhatsApp registrada")
+        # Blueprint já foi registrado no modo Railway
+        if not (os.getenv('RAILWAY_ENVIRONMENT') or os.getenv('PORT')):
+            app.register_blueprint(session_api)
+            logger.info("✅ API de sessão WhatsApp registrada")
         
         # Iniciar servidor Flask
         port = int(os.getenv('PORT', 5000))
