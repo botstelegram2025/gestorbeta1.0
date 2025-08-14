@@ -149,10 +149,12 @@ class TelegramBot:
             self.baileys_cleaner = BaileysCleaner()
             logger.info("✅ Baileys Cleaner inicializado")
             
+            logger.info("✅ Todos os serviços inicializados")
             return True
             
         except Exception as e:
             logger.error(f"Erro ao inicializar serviços: {e}")
+            logger.error(f"Detalhes do erro: {type(e).__name__}: {str(e)}")
             return False
     
     def is_admin(self, chat_id):
@@ -938,6 +940,29 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
     
     def iniciar_cadastro_cliente(self, chat_id):
         """Inicia cadastro de cliente"""
+        # Verificar se os serviços necessários estão inicializados
+        if not self.db:
+            self.send_message(chat_id, "❌ Erro interno: Banco de dados não inicializado. Tente novamente em alguns minutos.")
+            return
+        
+        if not self.user_manager:
+            self.send_message(chat_id, "❌ Erro interno: Sistema de usuários não inicializado. Tente novamente em alguns minutos.")
+            return
+            
+        # Verificar acesso do usuário
+        if not self.is_admin(chat_id):
+            acesso_info = self.user_manager.verificar_acesso(chat_id)
+            if not acesso_info['acesso']:
+                self.send_message(chat_id, 
+                    f"❌ Acesso expirado.\n\n"
+                    f"⏰ Sua assinatura expirou em {acesso_info.get('fim_periodo', 'data não disponível')}.\n\n"
+                    f"💳 Renove sua assinatura para continuar usando o sistema.",
+                    reply_markup={'inline_keyboard': [[
+                        {'text': '💳 Assinar Agora', 'callback_data': 'gerar_pix_' + str(chat_id)},
+                        {'text': '🔙 Voltar', 'callback_data': 'menu_principal'}
+                    ]]})
+                return
+        
         self.conversation_states[chat_id] = {
             'action': 'cadastrar_cliente',
             'step': 'nome',
@@ -1286,6 +1311,17 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
         """Confirma cadastro do cliente"""
         if text == '✅ Confirmar':
             try:
+                # Verificar novamente se os serviços estão disponíveis
+                if not self.db:
+                    self.send_message(chat_id, "❌ Erro interno: Banco de dados indisponível.")
+                    self.cancelar_operacao(chat_id)
+                    return
+                
+                if not hasattr(self.db, 'criar_cliente') or not callable(getattr(self.db, 'criar_cliente', None)):
+                    self.send_message(chat_id, "❌ Erro interno: Método de cadastro indisponível.")
+                    self.cancelar_operacao(chat_id)
+                    return
+                
                 dados = user_state['dados']
                 cliente_id = self.db.criar_cliente(
                     dados['nome'], dados['telefone'], dados['plano'],
