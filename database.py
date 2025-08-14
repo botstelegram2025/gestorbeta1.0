@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 class DatabaseManager:
     def __init__(self):
         """Inicializa conexão com PostgreSQL"""
+        # Primeiro tentar DATABASE_URL (padrão Railway)
+        self.database_url = os.getenv('DATABASE_URL')
+        
+        # Fallback para variáveis individuais
         self.connection_params = {
             'host': os.getenv('PGHOST', 'localhost'),
             'database': os.getenv('PGDATABASE', 'bot_clientes'),
@@ -23,6 +27,14 @@ class DatabaseManager:
             'password': os.getenv('PGPASSWORD', ''),
             'port': os.getenv('PGPORT', '5432')
         }
+        
+        logger.info(f"🔧 Configuração do banco:")
+        if self.database_url:
+            logger.info(f"- DATABASE_URL: {self.database_url[:50]}...")
+        logger.info(f"- Host: {self.connection_params['host']}")
+        logger.info(f"- Database: {self.connection_params['database']}")
+        logger.info(f"- User: {self.connection_params['user']}")
+        logger.info(f"- Port: {self.connection_params['port']}")
         
         # Cache para consultas frequentes
         self._cache = {}
@@ -32,13 +44,25 @@ class DatabaseManager:
         self.init_database()
     
     def get_connection(self):
-        """Cria nova conexão com o banco"""
+        """Cria nova conexão com o banco - Railway prioritário"""
+        # Tentar DATABASE_URL primeiro (Railway)
+        if self.database_url:
+            try:
+                conn = psycopg2.connect(self.database_url)
+                conn.autocommit = False
+                return conn
+            except Exception as e:
+                logger.warning(f"Falha com DATABASE_URL: {e}")
+        
+        # Fallback para parâmetros individuais
         try:
             conn = psycopg2.connect(**self.connection_params)
-            conn.autocommit = False  # Controle manual de transações
+            conn.autocommit = False
             return conn
         except Exception as e:
             logger.error(f"Erro ao conectar com PostgreSQL: {e}")
+            logger.error(f"DATABASE_URL disponível: {bool(self.database_url)}")
+            logger.error(f"Parâmetros: {self.connection_params}")
             raise
     
     def _get_cache(self, key):

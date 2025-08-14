@@ -83,6 +83,9 @@ async function connectToWhatsApp() {
     try {
         console.log('🔄 Iniciando conexão com WhatsApp...');
         
+        // Primeiro tentar restaurar sessão do banco
+        await restoreSessionFromDatabase();
+        
         const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
         
         sock = makeWASocket({
@@ -90,11 +93,11 @@ async function connectToWhatsApp() {
             printQRInTerminal: false
         });
 
-        // Salvar credenciais e backup
+        // Salvar credenciais e backup automático
         sock.ev.on('creds.update', async () => {
             await saveCreds();
-            // Fazer backup a cada update das credenciais
-            setTimeout(saveSessionToDatabase, 2000);
+            // Fazer backup imediato a cada update das credenciais (crítico para Railway)
+            setTimeout(saveSessionToDatabase, 1000);
         });
         
         // Monitorar conexão (logs reduzidos)
@@ -138,11 +141,14 @@ async function connectToWhatsApp() {
                 isConnected = true;
                 connectionStatus = 'connected';
                 qrCode = '';
-                console.log('✅ WhatsApp conectado!');
+                console.log('✅ WhatsApp conectado com sucesso!');
                 
-                // Configurar backup automático a cada 5 minutos
+                // Configurar backup automático a cada 2 minutos para maior frequência
                 if (backupInterval) clearInterval(backupInterval);
-                backupInterval = setInterval(saveSessionToDatabase, 5 * 60 * 1000);
+                backupInterval = setInterval(saveSessionToDatabase, 2 * 60 * 1000);
+                
+                // Fazer backup imediato após conectar
+                setTimeout(saveSessionToDatabase, 5000);
                 console.log('📞 Número:', sock.user.id);
             } else if (connection === 'connecting') {
                 if (connectionStatus !== 'connecting') {
