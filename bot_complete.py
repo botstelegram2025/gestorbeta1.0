@@ -111,8 +111,25 @@ class TelegramBot:
     def initialize_services(self):
         """Inicializa os serviços do bot"""
         try:
-            # Inicializar banco de dados
+            # Inicializar banco de dados com retry
+            logger.info("🔄 Inicializando banco de dados...")
             self.db = DatabaseManager()
+            
+            # Verificar se a inicialização do banco foi bem-sucedida
+            if not hasattr(self.db, 'get_connection'):
+                raise Exception("Falha na inicialização do banco de dados")
+            
+            # Testar conectividade
+            try:
+                with self.db.get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("SELECT 1")
+                        cursor.fetchone()
+                logger.info("✅ Banco de dados conectado e funcional")
+            except Exception as e:
+                logger.error(f"Falha no teste de conectividade: {e}")
+                raise Exception("Banco de dados não responsivo")
+            
             logger.info("✅ Banco de dados inicializado")
             
             # Inicializar gerenciamento de usuários

@@ -96,20 +96,49 @@ class DatabaseManager:
             raise
     
     def init_database(self):
-        """Inicializa tabelas do banco de dados"""
-        try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cursor:
-                    # Criar tabelas
-                    self.create_tables(cursor)
-                    self.create_indexes(cursor)
-                    self.insert_default_templates(cursor)
-                    self.insert_default_configs(cursor)
+        """Inicializa as tabelas do banco de dados com retry para Railway"""
+        max_attempts = 5
+        retry_delay = 2
+        
+        for attempt in range(max_attempts):
+            try:
+                # Testar conectividade básica primeiro
+                logger.info(f"Tentativa {attempt + 1} de conectar ao banco...")
+                conn = self.get_connection()
+                
+                with conn:
+                    with conn.cursor() as cursor:
+                        # Testar uma query simples primeiro
+                        cursor.execute("SELECT 1")
+                        cursor.fetchone()
+                        logger.info("Conectividade básica confirmada")
+                        
+                        # Criar estrutura do banco
+                        self.create_tables(cursor)
+                        self.create_indexes(cursor)
+                        self.insert_default_templates(cursor)
+                        self.insert_default_configs(cursor)
+                        
                     conn.commit()
                     logger.info("Banco de dados inicializado com sucesso!")
-        except Exception as e:
-            logger.error(f"Erro ao inicializar banco: {e}")
-            raise
+                    return True
+                    
+            except psycopg2.OperationalError as e:
+                logger.warning(f"Erro de conectividade na tentativa {attempt + 1}: {e}")
+                if attempt < max_attempts - 1:
+                    import time
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Backoff exponencial
+                else:
+                    logger.error("Esgotadas tentativas de conexão com PostgreSQL")
+                    raise
+                    
+            except Exception as e:
+                logger.error(f"Erro ao inicializar banco de dados: {e}")
+                logger.error(f"Detalhes da conexão: {self.connection_params}")
+                raise
+        
+        return False
     
     def create_tables(self, cursor):
         """Cria todas as tabelas necessárias"""
