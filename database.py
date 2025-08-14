@@ -59,6 +59,42 @@ class DatabaseManager:
         self._cache[key] = value
         self._cache_ttl[key] = time.time() + self._cache_timeout
     
+    def execute_query(self, query, params=None):
+        """Executa uma query de modificação (INSERT, UPDATE, DELETE)"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, params)
+                    conn.commit()
+                    return cursor.rowcount
+        except Exception as e:
+            logger.error(f"Erro ao executar query: {e}")
+            raise
+    
+    def fetch_one(self, query, params=None):
+        """Executa uma query e retorna um único resultado"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute(query, params)
+                    result = cursor.fetchone()
+                    return dict(result) if result else None
+        except Exception as e:
+            logger.error(f"Erro ao executar fetch_one: {e}")
+            raise
+    
+    def fetch_all(self, query, params=None):
+        """Executa uma query e retorna todos os resultados"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute(query, params)
+                    results = cursor.fetchall()
+                    return [dict(result) for result in results]
+        except Exception as e:
+            logger.error(f"Erro ao executar fetch_all: {e}")
+            raise
+    
     def init_database(self):
         """Inicializa tabelas do banco de dados"""
         try:
@@ -78,10 +114,45 @@ class DatabaseManager:
     def create_tables(self, cursor):
         """Cria todas as tabelas necessárias"""
         
-        # Tabela de clientes
+        # Tabela de usuários do sistema (multi-tenant)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT UNIQUE NOT NULL,
+                nome VARCHAR(255) NOT NULL,
+                email VARCHAR(255),
+                telefone VARCHAR(20),
+                data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                fim_periodo_teste TIMESTAMP,
+                ultimo_pagamento TIMESTAMP,
+                proximo_vencimento TIMESTAMP,
+                status VARCHAR(50) DEFAULT 'teste_gratuito',
+                plano_ativo BOOLEAN DEFAULT TRUE,
+                total_pagamentos DECIMAL(10, 2) DEFAULT 0,
+                dados_adicionais JSONB
+            )
+        """)
+        
+        # Tabela de pagamentos
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pagamentos (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                valor DECIMAL(10, 2) NOT NULL,
+                data_pagamento TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                referencia VARCHAR(255),
+                status VARCHAR(50) DEFAULT 'pendente',
+                payment_id VARCHAR(255),
+                dados_pagamento JSONB,
+                FOREIGN KEY (chat_id) REFERENCES usuarios(chat_id)
+            )
+        """)
+        
+        # Tabela de clientes (agora com referência ao usuário)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS clientes (
                 id SERIAL PRIMARY KEY,
+                chat_id_usuario BIGINT NOT NULL,
                 nome VARCHAR(255) NOT NULL,
                 telefone VARCHAR(20) NOT NULL,
                 pacote VARCHAR(255) NOT NULL,
@@ -90,7 +161,11 @@ class DatabaseManager:
                 vencimento DATE NOT NULL,
                 ativo BOOLEAN DEFAULT TRUE,
                 data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                data_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                data_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                info_adicional TEXT,
+                receber_cobranca BOOLEAN DEFAULT TRUE,
+                receber_notificacoes BOOLEAN DEFAULT TRUE,
+                preferencias_notificacao JSONB DEFAULT '{}'
             )
         """)
         
@@ -120,10 +195,11 @@ class DatabaseManager:
             )
         """)
         
-        # Tabela de logs de envio
+        # Tabela de logs de envio (com referência ao usuário)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS logs_envio (
                 id SERIAL PRIMARY KEY,
+                chat_id_usuario BIGINT,
                 cliente_id INTEGER REFERENCES clientes(id),
                 template_id INTEGER REFERENCES templates(id),
                 telefone VARCHAR(20) NOT NULL,
@@ -132,7 +208,8 @@ class DatabaseManager:
                 sucesso BOOLEAN NOT NULL,
                 erro TEXT,
                 message_id VARCHAR(255),
-                data_envio TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                data_envio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (chat_id_usuario) REFERENCES usuarios(chat_id)
             )
         """)
         
@@ -161,9 +238,16 @@ class DatabaseManager:
     def create_indexes(self, cursor):
         """Cria índices para otimização"""
         indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_usuarios_chat_id ON usuarios(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_usuarios_status ON usuarios(status)",
+            "CREATE INDEX IF NOT EXISTS idx_usuarios_vencimento ON usuarios(proximo_vencimento)",
+            "CREATE INDEX IF NOT EXISTS idx_pagamentos_chat_id ON pagamentos(chat_id)",
+            "CREATE INDEX IF NOT EXISTS idx_pagamentos_status ON pagamentos(status)",
+            "CREATE INDEX IF NOT EXISTS idx_clientes_usuario ON clientes(chat_id_usuario)",
             "CREATE INDEX IF NOT EXISTS idx_clientes_telefone ON clientes(telefone)",
             "CREATE INDEX IF NOT EXISTS idx_clientes_vencimento ON clientes(vencimento)",
             "CREATE INDEX IF NOT EXISTS idx_clientes_ativo ON clientes(ativo)",
+            "CREATE INDEX IF NOT EXISTS idx_logs_usuario ON logs_envio(chat_id_usuario)",
             "CREATE INDEX IF NOT EXISTS idx_logs_cliente_id ON logs_envio(cliente_id)",
             "CREATE INDEX IF NOT EXISTS idx_logs_data_envio ON logs_envio(data_envio)",
             "CREATE INDEX IF NOT EXISTS idx_fila_agendado ON fila_mensagens(agendado_para)",
@@ -177,7 +261,7 @@ class DatabaseManager:
         logger.info("Índices criados com sucesso!")
     
     def insert_default_templates(self, cursor):
-        """Insere templates padrão do sistema"""
+        """Insere templates padrão do sistema GLOBAIS (sem usuário específico)"""
         templates_default = [
             {
                 'nome': 'Aviso 2 Dias',
@@ -294,11 +378,16 @@ _Envie o comprovante após o pagamento!_ 📄"""
         ]
         
         for template in templates_default:
+            # Verificar se já existe template global (chat_id_usuario = NULL)
             cursor.execute("""
-                INSERT INTO templates (nome, descricao, tipo, conteudo)
-                VALUES (%(nome)s, %(descricao)s, %(tipo)s, %(conteudo)s)
-                ON CONFLICT (nome) DO NOTHING
-            """, template)
+                SELECT COUNT(*) FROM templates 
+                WHERE nome = %s AND chat_id_usuario IS NULL
+            """, (template['nome'],))
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("""
+                    INSERT INTO templates (nome, descricao, tipo, conteudo, chat_id_usuario)
+                    VALUES (%(nome)s, %(descricao)s, %(tipo)s, %(conteudo)s, NULL)
+                """, template)
         
         logger.info("Templates padrão inseridos com sucesso!")
     
@@ -317,26 +406,179 @@ _Envie o comprovante após o pagamento!_ 📄"""
         ]
         
         for chave, valor, descricao in configs_default:
+            # Verificar se já existe configuração global (chat_id_usuario = NULL)
             cursor.execute("""
-                INSERT INTO configuracoes (chave, valor, descricao)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (chave) DO NOTHING
-            """, (chave, valor, descricao))
+                SELECT COUNT(*) FROM configuracoes 
+                WHERE chave = %s AND chat_id_usuario IS NULL
+            """, (chave,))
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("""
+                    INSERT INTO configuracoes (chave, valor, descricao, chat_id_usuario)
+                    VALUES (%s, %s, %s, NULL)
+                """, (chave, valor, descricao))
         
         logger.info("Configurações padrão inseridas com sucesso!")
     
+    def criar_templates_usuario(self, chat_id_usuario):
+        """Cria templates personalizados para um usuário específico"""
+        try:
+            templates_usuario = [
+                {
+                    'nome': f'Aviso 2 Dias - User {chat_id_usuario}',
+                    'descricao': 'Mensagem enviada 2 dias antes do vencimento',
+                    'tipo': 'vencimento_2dias',
+                    'conteudo': """🔔 *Lembrete de Vencimento*
+
+Olá {nome}! 👋
+
+Seu plano *{pacote}* vencerá em *2 dias* ({vencimento}).
+
+💰 Valor: *R$ {valor}*
+🖥️ Servidor: *{servidor}*
+
+Para renovar, entre em contato conosco ou faça o PIX:
+
+💳 *Chave PIX:* [Configure sua chave PIX]
+💰 *Valor:* R$ {valor}
+
+📞 *Suporte:* [Configure seu telefone]
+
+_Mensagem automática do sistema_ 🤖""",
+                    'chat_id_usuario': chat_id_usuario
+                },
+                {
+                    'nome': f'Vencimento Hoje - User {chat_id_usuario}',
+                    'descricao': 'Mensagem enviada no dia do vencimento',
+                    'tipo': 'vencimento_hoje',
+                    'conteudo': """⚠️ *VENCIMENTO HOJE*
+
+Olá {nome}! 👋
+
+Seu plano *{pacote}* vence *HOJE* ({vencimento}).
+
+💰 Valor: *R$ {valor}*
+🖥️ Servidor: *{servidor}*
+
+⏰ *RENOVAÇÃO URGENTE*
+
+💳 *Chave PIX:* [Configure sua chave PIX]
+💰 *Valor:* R$ {valor}
+
+📞 *Suporte:* [Configure seu telefone]
+
+_Renove hoje para não perder o acesso!_ ⚡""",
+                    'chat_id_usuario': chat_id_usuario
+                },
+                {
+                    'nome': f'Vencido 1 Dia - User {chat_id_usuario}',
+                    'descricao': 'Mensagem enviada 1 dia após vencimento',
+                    'tipo': 'vencimento_1dia_apos',
+                    'conteudo': """🔴 *PLANO VENCIDO*
+
+Olá {nome}! 👋
+
+Seu plano *{pacote}* venceu ontem ({vencimento}).
+
+💰 Valor: *R$ {valor}*
+🖥️ Servidor: *{servidor}*
+
+🚨 *ACESSO SERÁ SUSPENSO EM BREVE*
+
+Para reativar:
+
+💳 *Chave PIX:* [Configure sua chave PIX]
+💰 *Valor:* R$ {valor}
+
+📞 *Suporte:* [Configure seu telefone]
+
+_Regularize sua situação o quanto antes!_ ⚠️""",
+                    'chat_id_usuario': chat_id_usuario
+                },
+                {
+                    'nome': f'Boas Vindas - User {chat_id_usuario}',
+                    'descricao': 'Mensagem de boas vindas para novos clientes',
+                    'tipo': 'boas_vindas',
+                    'conteudo': """🎉 *BEM-VINDO(A)!*
+
+Olá {nome}! 👋
+
+Seu cadastro foi realizado com sucesso!
+
+📦 *Plano:* {pacote}
+💰 *Valor:* R$ {valor}
+🖥️ *Servidor:* {servidor}
+📅 *Vencimento:* {vencimento}
+
+🔐 *Dados de acesso serão enviados em breve!*
+
+📞 *Suporte:* [Configure seu telefone]
+
+_Obrigado por escolher nossos serviços!_ ✨""",
+                    'chat_id_usuario': chat_id_usuario
+                }
+            ]
+            
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    for template in templates_usuario:
+                        cursor.execute("""
+                            INSERT INTO templates (nome, descricao, tipo, conteudo, chat_id_usuario)
+                            VALUES (%(nome)s, %(descricao)s, %(tipo)s, %(conteudo)s, %(chat_id_usuario)s)
+                        """, template)
+                    conn.commit()
+                    
+            logger.info(f"Templates personalizados criados para usuário {chat_id_usuario}")
+            
+        except Exception as e:
+            logger.error(f"Erro ao criar templates do usuário: {e}")
+            raise
+    
+    def criar_configuracoes_usuario(self, chat_id_usuario, nome_usuario):
+        """Cria configurações personalizadas para um usuário específico"""
+        try:
+            configs_usuario = [
+                ('empresa_nome', f'{nome_usuario} IPTV', 'Nome da empresa exibido nas mensagens'),
+                ('empresa_pix', '', 'Chave PIX da empresa para pagamentos'),
+                ('empresa_titular', nome_usuario, 'Nome do titular da conta PIX'),
+                ('empresa_telefone', '', 'Telefone de contato da empresa'),
+                ('baileys_url', 'http://localhost:3000', 'URL da API Baileys WhatsApp'),
+                ('baileys_status', 'desconectado', 'Status da conexão com WhatsApp'),
+                ('notificacoes_ativas', 'true', 'Se as notificações automáticas estão ativas'),
+                ('horario_cobranca', '09:00', 'Horário padrão para envio de cobranças'),
+                ('dias_aviso_vencimento', '2', 'Dias de antecedência para avisos de vencimento'),
+            ]
+            
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    for chave, valor, descricao in configs_usuario:
+                        cursor.execute("""
+                            INSERT INTO configuracoes (chave, valor, descricao, chat_id_usuario)
+                            VALUES (%s, %s, %s, %s)
+                        """, (chave, valor, descricao, chat_id_usuario))
+                    conn.commit()
+                    
+            logger.info(f"Configurações personalizadas criadas para usuário {chat_id_usuario}")
+            
+        except Exception as e:
+            logger.error(f"Erro ao criar configurações do usuário: {e}")
+            raise
+    
     # === MÉTODOS DE CLIENTES ===
     
-    def cadastrar_cliente(self, nome, telefone, pacote, valor, servidor, vencimento, info_adicional=None):
+    def cadastrar_cliente(self, nome, telefone, pacote, valor, servidor, vencimento, chat_id_usuario=None, info_adicional=None):
         """Cadastra novo cliente e invalida cache"""
+        # Default para admin se não especificado
+        if chat_id_usuario is None:
+            chat_id_usuario = int(os.getenv('ADMIN_CHAT_ID', '1460561546'))
+            
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        INSERT INTO clientes (nome, telefone, pacote, valor, servidor, vencimento, info_adicional)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        INSERT INTO clientes (chat_id_usuario, nome, telefone, pacote, valor, servidor, vencimento, info_adicional)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
-                    """, (nome, telefone, pacote, valor, servidor, vencimento, info_adicional))
+                    """, (chat_id_usuario, nome, telefone, pacote, valor, servidor, vencimento, info_adicional))
                     
                     cliente_id = cursor.fetchone()[0]
                     conn.commit()
@@ -351,13 +593,13 @@ _Envie o comprovante após o pagamento!_ 📄"""
             logger.error(f"Erro ao cadastrar cliente: {e}")
             raise
     
-    def criar_cliente(self, nome, telefone, pacote, valor, servidor, vencimento, info_adicional=None):
+    def criar_cliente(self, nome, telefone, pacote, valor, servidor, vencimento, chat_id_usuario=None, info_adicional=None):
         """Alias para cadastrar_cliente (compatibilidade)"""
-        return self.cadastrar_cliente(nome, telefone, pacote, valor, servidor, vencimento, info_adicional)
+        return self.cadastrar_cliente(nome, telefone, pacote, valor, servidor, vencimento, chat_id_usuario, info_adicional)
     
-    def listar_clientes(self, apenas_ativos=True, limit=None):
+    def listar_clientes(self, apenas_ativos=True, limit=None, chat_id_usuario=None):
         """Lista clientes com informações de vencimento e cache otimizado"""
-        cache_key = f"clientes_{apenas_ativos}_{limit}"
+        cache_key = f"clientes_{apenas_ativos}_{limit}_{chat_id_usuario}"
         
         # Verificar cache primeiro
         cached = self._get_cache(cache_key)
@@ -367,13 +609,24 @@ _Envie o comprovante após o pagamento!_ 📄"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    where_clause = "WHERE ativo = TRUE" if apenas_ativos else ""
+                    where_conditions = []
+                    params = []
+                    
+                    if apenas_ativos:
+                        where_conditions.append("ativo = TRUE")
+                    
+                    # CRÍTICO: Filtrar por usuário para isolamento de dados
+                    if chat_id_usuario is not None:
+                        where_conditions.append("chat_id_usuario = %s")
+                        params.append(chat_id_usuario)
+                    
+                    where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
                     limit_clause = f"LIMIT {limit}" if limit else ""
                     
                     cursor.execute(f"""
                         SELECT 
                             id, nome, telefone, pacote, valor, servidor, vencimento,
-                            ativo, data_cadastro, info_adicional,
+                            ativo, data_cadastro, info_adicional, chat_id_usuario,
                             (vencimento - CURRENT_DATE) as dias_vencimento,
                             CASE 
                                 WHEN vencimento < CURRENT_DATE THEN 'vencido'
@@ -385,7 +638,7 @@ _Envie o comprovante após o pagamento!_ 📄"""
                         {where_clause}
                         ORDER BY vencimento ASC, nome ASC
                         {limit_clause}
-                    """)
+                    """, params)
                     
                     clientes = cursor.fetchall()
                     result = [dict(cliente) for cliente in clientes]
@@ -422,6 +675,8 @@ _Envie o comprovante após o pagamento!_ 📄"""
                         SELECT 
                             id, nome, telefone, pacote, valor, servidor, vencimento,
                             ativo, data_cadastro, data_atualizacao, info_adicional,
+                            chat_id_usuario, receber_cobranca, receber_notificacoes,
+                            preferencias_notificacao,
                             (vencimento - CURRENT_DATE) as dias_vencimento
                         FROM clientes 
                         WHERE id = %s
@@ -524,22 +779,34 @@ _Envie o comprovante após o pagamento!_ 📄"""
             logger.error(f"Erro ao excluir cliente: {e}")
             raise
     
-    def buscar_clientes(self, termo):
+    def buscar_clientes(self, termo, chat_id_usuario=None):
         """Busca clientes por nome ou telefone"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute("""
+                    where_conditions = [
+                        "(LOWER(nome) LIKE LOWER(%s) OR telefone LIKE %s)",
+                        "ativo = TRUE"
+                    ]
+                    params = [f'%{termo}%', f'%{termo}%']
+                    
+                    # CRÍTICO: Filtrar por usuário para isolamento
+                    if chat_id_usuario is not None:
+                        where_conditions.append("chat_id_usuario = %s")
+                        params.append(chat_id_usuario)
+                    
+                    where_clause = " AND ".join(where_conditions)
+                    
+                    cursor.execute(f"""
                         SELECT 
                             id, nome, telefone, pacote, valor, servidor, vencimento,
-                            ativo, data_cadastro,
+                            ativo, data_cadastro, chat_id_usuario,
                             (vencimento - CURRENT_DATE) as dias_vencimento
                         FROM clientes 
-                        WHERE (LOWER(nome) LIKE LOWER(%s) OR telefone LIKE %s)
-                        AND ativo = TRUE
+                        WHERE {where_clause}
                         ORDER BY nome ASC
                         LIMIT 20
-                    """, (f'%{termo}%', f'%{termo}%'))
+                    """, params)
                     
                     clientes = cursor.fetchall()
                     return [dict(cliente) for cliente in clientes]
@@ -613,22 +880,181 @@ _Envie o comprovante após o pagamento!_ 📄"""
         """Reativa cliente"""
         return self.atualizar_cliente(cliente_id, ativo=True)
     
-    # === MÉTODOS DE TEMPLATES ===
+    # === MÉTODOS DE PREFERÊNCIAS DE NOTIFICAÇÃO ===
     
-    def listar_templates(self, apenas_ativos=True):
-        """Lista todos os templates"""
+    def atualizar_preferencias_cliente(self, cliente_id, receber_cobranca=None, receber_notificacoes=None, preferencias_extras=None, chat_id_usuario=None):
+        """Atualiza preferências de notificação de um cliente"""
+        try:
+            dados_update = {}
+            
+            if receber_cobranca is not None:
+                dados_update['receber_cobranca'] = receber_cobranca
+            
+            if receber_notificacoes is not None:
+                dados_update['receber_notificacoes'] = receber_notificacoes
+                
+            if preferencias_extras is not None:
+                import json
+                dados_update['preferencias_notificacao'] = json.dumps(preferencias_extras) if isinstance(preferencias_extras, dict) else preferencias_extras
+            
+            if not dados_update:
+                return False
+            
+            # Usar o método existente com filtro de usuário
+            campos_set = []
+            valores = []
+            
+            for campo, valor in dados_update.items():
+                campos_set.append(f"{campo} = %s")
+                valores.append(valor)
+            
+            campos_set.append("data_atualizacao = CURRENT_TIMESTAMP")
+            valores.append(cliente_id)
+            
+            query = f"""
+                UPDATE clientes 
+                SET {', '.join(campos_set)}
+                WHERE id = %s
+            """
+            
+            # CRÍTICO: Adicionar isolamento por usuário
+            if chat_id_usuario is not None:
+                query += " AND chat_id_usuario = %s"
+                valores.append(chat_id_usuario)
+            
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, valores)
+                    conn.commit()
+                    
+                    success = cursor.rowcount > 0
+                    if success:
+                        logger.info(f"Preferências atualizadas para cliente ID {cliente_id}")
+                    
+                    return success
+                    
+        except Exception as e:
+            logger.error(f"Erro ao atualizar preferências do cliente: {e}")
+            raise
+    
+    def obter_preferencias_cliente(self, cliente_id, chat_id_usuario=None):
+        """Obtém preferências de notificação de um cliente"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    where_clause = "WHERE ativo = TRUE" if apenas_ativos else ""
+                    query = """
+                        SELECT 
+                            id, nome, receber_cobranca, receber_notificacoes, 
+                            preferencias_notificacao
+                        FROM clientes 
+                        WHERE id = %s
+                    """
+                    params = [cliente_id]
+                    
+                    # CRÍTICO: Adicionar isolamento por usuário
+                    if chat_id_usuario is not None:
+                        query += " AND chat_id_usuario = %s"
+                        params.append(chat_id_usuario)
+                    
+                    cursor.execute(query, params)
+                    resultado = cursor.fetchone()
+                    
+                    if resultado:
+                        dados = dict(resultado)
+                        # Converter JSON de preferencias_notificacao se necessário
+                        if dados.get('preferencias_notificacao'):
+                            import json
+                            try:
+                                dados['preferencias_notificacao'] = json.loads(dados['preferencias_notificacao'])
+                            except:
+                                dados['preferencias_notificacao'] = {}
+                        else:
+                            dados['preferencias_notificacao'] = {}
+                        
+                        return dados
+                    
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"Erro ao obter preferências do cliente: {e}")
+            raise
+    
+    def cliente_pode_receber_cobranca(self, cliente_id, chat_id_usuario=None):
+        """Verifica se cliente pode receber mensagens de cobrança"""
+        try:
+            prefs = self.obter_preferencias_cliente(cliente_id, chat_id_usuario)
+            return prefs.get('receber_cobranca', True) if prefs else False
+        except Exception as e:
+            logger.error(f"Erro ao verificar preferências de cobrança: {e}")
+            return False
+    
+    def cliente_pode_receber_notificacoes(self, cliente_id, chat_id_usuario=None):
+        """Verifica se cliente pode receber notificações gerais"""
+        try:
+            prefs = self.obter_preferencias_cliente(cliente_id, chat_id_usuario)
+            return prefs.get('receber_notificacoes', True) if prefs else False
+        except Exception as e:
+            logger.error(f"Erro ao verificar preferências de notificação: {e}")
+            return False
+    
+    def listar_clientes_notificacao(self, tipo_notificacao='cobranca', chat_id_usuario=None):
+        """Lista clientes que podem receber determinado tipo de notificação"""
+        try:
+            campo_verificacao = 'receber_cobranca' if tipo_notificacao == 'cobranca' else 'receber_notificacoes'
+            
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    query = f"""
+                        SELECT 
+                            id, nome, telefone, pacote, valor, vencimento,
+                            {campo_verificacao}, receber_notificacoes, receber_cobranca
+                        FROM clientes 
+                        WHERE ativo = TRUE AND {campo_verificacao} = TRUE
+                    """
+                    params = []
+                    
+                    # CRÍTICO: Adicionar isolamento por usuário
+                    if chat_id_usuario is not None:
+                        query += " AND chat_id_usuario = %s"
+                        params.append(chat_id_usuario)
+                    
+                    query += " ORDER BY nome ASC"
+                    
+                    cursor.execute(query, params)
+                    clientes = cursor.fetchall()
+                    return [dict(cliente) for cliente in clientes]
+                    
+        except Exception as e:
+            logger.error(f"Erro ao listar clientes para notificação: {e}")
+            raise
+    
+    # === MÉTODOS DE TEMPLATES ===
+    
+    def listar_templates(self, apenas_ativos=True, chat_id_usuario=None):
+        """Lista templates com isolamento por usuário"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    where_conditions = []
+                    params = []
+                    
+                    if apenas_ativos:
+                        where_conditions.append("ativo = TRUE")
+                    
+                    # CRÍTICO: Filtrar por usuário para isolamento
+                    if chat_id_usuario is not None:
+                        where_conditions.append("chat_id_usuario = %s")
+                        params.append(chat_id_usuario)
+                    
+                    where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
                     
                     cursor.execute(f"""
                         SELECT id, nome, descricao, conteudo, tipo, ativo, uso_count,
-                               data_criacao, data_atualizacao
+                               data_criacao, data_atualizacao, chat_id_usuario
                         FROM templates 
                         {where_clause}
                         ORDER BY nome ASC
-                    """)
+                    """, params)
                     
                     templates = cursor.fetchall()
                     return [dict(template) for template in templates]
@@ -637,16 +1063,26 @@ _Envie o comprovante após o pagamento!_ 📄"""
             logger.error(f"Erro ao listar templates: {e}")
             raise
     
-    def obter_template(self, template_id):
-        """Obtém template por ID"""
+    def obter_template(self, template_id, chat_id_usuario=None):
+        """Obtém template por ID com isolamento por usuário"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute("""
-                        SELECT id, nome, descricao, conteudo, tipo, ativo, uso_count
+                    where_conditions = ["id = %s"]
+                    params = [template_id]
+                    
+                    # CRÍTICO: Filtrar por usuário para isolamento
+                    if chat_id_usuario is not None:
+                        where_conditions.append("chat_id_usuario = %s")
+                        params.append(chat_id_usuario)
+                    
+                    where_clause = " AND ".join(where_conditions)
+                    
+                    cursor.execute(f"""
+                        SELECT id, nome, descricao, conteudo, tipo, ativo, uso_count, chat_id_usuario
                         FROM templates 
-                        WHERE id = %s
-                    """, (template_id,))
+                        WHERE {where_clause}
+                    """, params)
                     
                     template = cursor.fetchone()
                     return dict(template) if template else None
@@ -655,17 +1091,27 @@ _Envie o comprovante após o pagamento!_ 📄"""
             logger.error(f"Erro ao obter template: {e}")
             raise
     
-    def obter_template_por_tipo(self, tipo):
-        """Obtém template por tipo"""
+    def obter_template_por_tipo(self, tipo, chat_id_usuario=None):
+        """Obtém template por tipo com isolamento por usuário"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute("""
-                        SELECT id, nome, descricao, conteudo, tipo, ativo, uso_count
+                    where_conditions = ["tipo = %s", "ativo = TRUE"]
+                    params = [tipo]
+                    
+                    # CRÍTICO: Filtrar por usuário para isolamento
+                    if chat_id_usuario is not None:
+                        where_conditions.append("chat_id_usuario = %s")
+                        params.append(chat_id_usuario)
+                    
+                    where_clause = " AND ".join(where_conditions)
+                    
+                    cursor.execute(f"""
+                        SELECT id, nome, descricao, conteudo, tipo, ativo, uso_count, chat_id_usuario
                         FROM templates 
-                        WHERE tipo = %s AND ativo = TRUE
+                        WHERE {where_clause}
                         LIMIT 1
-                    """, (tipo,))
+                    """, params)
                     
                     template = cursor.fetchone()
                     return dict(template) if template else None
@@ -1088,15 +1534,26 @@ _Envie o comprovante após o pagamento!_ 📄"""
     
     # === MÉTODOS DE CONFIGURAÇÃO ===
     
-    def obter_configuracao(self, chave, valor_padrao=None):
-        """Obtém valor de configuração"""
+    def obter_configuracao(self, chave, valor_padrao=None, chat_id_usuario=None):
+        """Obtém valor de configuração com isolamento por usuário"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("""
-                        SELECT valor FROM configuracoes WHERE chave = %s
-                    """, (chave,))
+                    # Se chat_id_usuario fornecido, busca configuração específica do usuário primeiro
+                    if chat_id_usuario is not None:
+                        cursor.execute("""
+                            SELECT valor FROM configuracoes 
+                            WHERE chave = %s AND chat_id_usuario = %s
+                        """, (chave, chat_id_usuario))
+                        resultado = cursor.fetchone()
+                        if resultado:
+                            return resultado[0]
                     
+                    # Se não encontrou ou não foi especificado usuário, busca configuração global
+                    cursor.execute("""
+                        SELECT valor FROM configuracoes 
+                        WHERE chave = %s AND chat_id_usuario IS NULL
+                    """, (chave,))
                     resultado = cursor.fetchone()
                     return resultado[0] if resultado else valor_padrao
                     

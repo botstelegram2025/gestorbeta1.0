@@ -349,6 +349,11 @@ class MessageScheduler:
     def _enviar_mensagem_cliente(self, cliente, tipo_template):
         """Envia mensagem imediatamente para o cliente"""
         try:
+            # Verificar preferências de notificação PRIMEIRO
+            if not self._cliente_pode_receber_mensagem(cliente, tipo_template):
+                logger.info(f"Cliente {cliente['nome']} optou por não receber mensagens do tipo {tipo_template}")
+                return False
+            
             # Buscar template correspondente
             template = self.db.obter_template_por_tipo(tipo_template)
             if not template:
@@ -385,6 +390,35 @@ class MessageScheduler:
         except Exception as e:
             logger.error(f"Erro ao enviar mensagem para cliente: {e}")
             return False
+    
+    def _cliente_pode_receber_mensagem(self, cliente, tipo_template):
+        """Verifica se o cliente pode receber mensagens baseado nas preferências de notificação"""
+        try:
+            cliente_id = cliente['id']
+            chat_id_usuario = cliente.get('chat_id_usuario')
+            
+            # Obter preferências do cliente
+            if hasattr(self.db, 'cliente_pode_receber_cobranca'):
+                # Verificar tipo de mensagem
+                if tipo_template in ['vencimento_1dia_apos', 'vencimento_hoje', 'vencimento_2dias']:
+                    # Mensagem de cobrança/vencimento
+                    pode_receber = self.db.cliente_pode_receber_cobranca(cliente_id, chat_id_usuario)
+                    logger.info(f"Cliente {cliente['nome']}: pode receber cobrança = {pode_receber}")
+                    return pode_receber
+                else:
+                    # Outras notificações (renovação, promoções, etc.)
+                    pode_receber = self.db.cliente_pode_receber_notificacoes(cliente_id, chat_id_usuario)
+                    logger.info(f"Cliente {cliente['nome']}: pode receber notificações = {pode_receber}")
+                    return pode_receber
+            else:
+                # Compatibilidade: se não tem o método, permitir envio
+                logger.warning("Métodos de verificação de preferências não disponíveis - permitindo envio")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Erro ao verificar preferências de notificação: {e}")
+            # Em caso de erro, permitir envio para manter funcionalidade
+            return True
     
     def _ja_enviada_hoje(self, cliente_id, template_id):
         """Verifica se a mensagem já foi enviada hoje para evitar duplicatas"""

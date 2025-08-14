@@ -144,12 +144,14 @@ def backup_session():
         session_id = data.get('session_id', 'default')
         
         success = session_manager.backup_session(session_data, session_id)
+        files_count = len(session_data) if isinstance(session_data, dict) else 0
         
         if success:
+            logger.info(f"💾 Backup realizado com sucesso: {files_count} arquivos para sessão {session_id}")
             return jsonify({
                 'success': True, 
                 'message': f'Sessão {session_id} salva com sucesso',
-                'files_count': len(session_data) if isinstance(session_data, dict) else 0
+                'files_count': files_count
             })
         else:
             return jsonify({'success': False, 'error': 'Erro ao salvar sessão'}), 500
