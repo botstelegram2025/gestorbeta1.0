@@ -1,4 +1,5 @@
-"""
+# Write the provided Python code to a downloadable file
+code = r'''"""
 Gerenciador de Banco de Dados PostgreSQL
 Sistema completo para gestão de clientes, templates e logs
 - Compatível com Railway (SSL obrigatório)
@@ -1824,3 +1825,8 @@ _Obrigado por escolher nossos serviços!_ ✨""",
         except Exception as e:
             logger.error(f"Erro ao cancelar mensagem da fila: {e}")
             raise
+'''
+path = "/mnt/data/database_manager.py"
+with open(path, "w", encoding="utf-8") as f:
+    f.write(code)
+path
