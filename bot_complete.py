@@ -5037,7 +5037,8 @@ Deseja realmente excluir este template?"""
                 nome=dados['nome'],
                 conteudo=dados['conteudo'],
                 tipo=dados['tipo'],
-                descricao=dados.get('descricao')
+                descricao=dados.get('descricao'),
+                chat_id_usuario=chat_id
             )
             
             if template_id:

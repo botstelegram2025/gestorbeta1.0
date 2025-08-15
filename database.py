@@ -1221,21 +1221,21 @@ _Obrigado por escolher nossos serviços!_ ✨""",
             logger.error(f"Erro ao excluir template: {e}")
             raise
     
-    def criar_template(self, nome, descricao, conteudo, tipo='geral'):
-        """Cria novo template"""
+    def criar_template(self, nome, descricao, conteudo, tipo='geral', chat_id_usuario=None):
+        """Cria novo template com isolamento por usuário"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        INSERT INTO templates (nome, descricao, conteudo, tipo)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO templates (nome, descricao, conteudo, tipo, chat_id_usuario)
+                        VALUES (%s, %s, %s, %s, %s)
                         RETURNING id
-                    """, (nome, descricao, conteudo, tipo))
+                    """, (nome, descricao, conteudo, tipo, chat_id_usuario))
                     
                     template_id = cursor.fetchone()[0]
                     conn.commit()
                     
-                    logger.info(f"Template criado: ID {template_id}, Nome: {nome}")
+                    logger.info(f"Template criado: ID {template_id}, Nome: {nome}, Usuário: {chat_id_usuario}")
                     return template_id
                     
         except Exception as e:

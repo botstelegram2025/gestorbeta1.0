@@ -93,16 +93,16 @@ class TemplateManager:
             logger.error(f"Erro ao obter template por tipo {tipo}: {e}")
             return None
     
-    def criar_template(self, nome, descricao, conteudo, tipo='geral'):
-        """Cria novo template"""
+    def criar_template(self, nome, conteudo, tipo='geral', descricao=None, chat_id_usuario=None):
+        """Cria novo template com isolamento por usuário"""
         try:
             # Validar conteúdo do template
             erros_validacao = self.validar_template(conteudo)
             if erros_validacao:
                 raise ValueError(f"Erros no template: {', '.join(erros_validacao)}")
             
-            template_id = self.db.criar_template(nome, descricao, conteudo, tipo)
-            logger.info(f"Template criado: {nome} (ID: {template_id})")
+            template_id = self.db.criar_template(nome, descricao, conteudo, tipo, chat_id_usuario)
+            logger.info(f"Template criado: {nome} (ID: {template_id}), Usuário: {chat_id_usuario}")
             return template_id
             
         except Exception as e:
