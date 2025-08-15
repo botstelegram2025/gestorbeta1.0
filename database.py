@@ -321,8 +321,10 @@ class DatabaseManager:
                 FOREIGN KEY (chat_id_usuario) REFERENCES usuarios(chat_id)
                 ON DELETE SET NULL;
             """)
-        except Exception:
-            pass  # Constraint já existe
+        except Exception as e:
+            # Ignore constraint já existe ou tabela não existe ainda
+            logger.debug(f"Constraint fila_mensagens já existe: {e}")
+            pass
         
         # Verificar e adicionar coluna chat_id_usuario em logs_envio se não existir
         cursor.execute("""
@@ -337,8 +339,9 @@ class DatabaseManager:
                 FOREIGN KEY (chat_id_usuario) REFERENCES usuarios(chat_id)
                 ON DELETE SET NULL;
             """)
-        except Exception:
-            pass  # Constraint já existe
+        except Exception as e:
+            logger.debug(f"Constraint logs_envio já existe: {e}")
+            pass
         
         # Verificar e adicionar coluna chat_id_usuario em configuracoes se não existir
         cursor.execute("""
@@ -353,8 +356,9 @@ class DatabaseManager:
                 FOREIGN KEY (chat_id_usuario) REFERENCES usuarios(chat_id)
                 ON DELETE SET NULL;
             """)
-        except Exception:
-            pass  # Constraint já existe
+        except Exception as e:
+            logger.debug(f"Constraint configuracoes já existe: {e}")
+            pass
         
         # Verificar e adicionar coluna chat_id_usuario em templates se não existir
         cursor.execute("""
@@ -369,8 +373,9 @@ class DatabaseManager:
                 FOREIGN KEY (chat_id_usuario) REFERENCES usuarios(chat_id)
                 ON DELETE SET NULL;
             """)
-        except Exception:
-            pass  # Constraint já existe
+        except Exception as e:
+            logger.debug(f"Constraint templates já existe: {e}")
+            pass
         
         # Constraints de unicidade multi-tenant
         cursor.execute("""

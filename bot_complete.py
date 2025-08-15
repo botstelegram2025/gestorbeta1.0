@@ -902,7 +902,8 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
         """Menu principal para administrador"""
         try:
             # Buscar estatísticas
-            total_clientes = len(self.db.listar_clientes(apenas_ativos=True)) if self.db else 0
+            # Admin vê todos os clientes (sem filtro de usuário)
+            total_clientes = len(self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None)) if self.db else 0
             clientes_vencendo = len(self.db.listar_clientes_vencendo(dias=7)) if self.db else 0
             
             # Estatísticas de usuários
@@ -3122,9 +3123,14 @@ Digite uma das opções para buscar:
                 self.send_message(chat_id, "❌ Digite algo para buscar.")
                 return
             
-            # Buscar clientes
+            # Buscar clientes - filtrar por usuário se não for admin
             resultados = []
-            clientes = self.db.listar_clientes() if self.db else []
+            if self.is_admin(chat_id):
+                # Admin vê todos os clientes
+                clientes = self.db.listar_clientes(chat_id_usuario=None) if self.db else []
+            else:
+                # Usuário comum vê apenas seus clientes
+                clientes = self.db.listar_clientes(chat_id_usuario=chat_id) if self.db else []
             
             texto_busca = texto_busca.strip().lower()
             
@@ -4262,7 +4268,11 @@ Infraestrutura sólida, processos automatizados e base tecnológica para crescim
             # Dados dos últimos 30 dias
             hoje = datetime.now().date()
             inicio = hoje - timedelta(days=30)
-            todos_clientes = self.db.listar_clientes(apenas_ativos=False) if self.db else []
+            # Filtrar por usuário - admin vê todos, usuário comum vê apenas seus
+            if self.is_admin(chat_id):
+                todos_clientes = self.db.listar_clientes(apenas_ativos=False, chat_id_usuario=None) if self.db else []
+            else:
+                todos_clientes = self.db.listar_clientes(apenas_ativos=False, chat_id_usuario=chat_id) if self.db else []
             
             # Agrupar por semana
             semanas = {}
@@ -4840,7 +4850,11 @@ Deseja realmente excluir este template?"""
                 self.send_message(chat_id, "❌ Template não encontrado.")
                 return
             
-            clientes = self.db.listar_clientes(apenas_ativos=True) if self.db else []
+            # Filtrar por usuário - admin vê todos, usuário comum vê apenas seus
+            if self.is_admin(chat_id):
+                clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None) if self.db else []
+            else:
+                clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id) if self.db else []
             
             if not clientes:
                 self.send_message(chat_id,
@@ -7278,8 +7292,11 @@ Acesse: http://localhost:3000/status"""
     def testar_envio_whatsapp(self, chat_id):
         """Testa envio de mensagem pelo WhatsApp"""
         try:
-            # Buscar um cliente para teste
-            clientes = self.db.listar_clientes(apenas_ativos=True) if self.db else []
+            # Buscar um cliente para teste - admin vê todos, usuário comum vê apenas seus
+            if self.is_admin(chat_id):
+                clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None) if self.db else []
+            else:
+                clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id) if self.db else []
             
             if not clientes:
                 self.send_message(chat_id, 
@@ -8735,15 +8752,21 @@ Entre em contato com o desenvolvedor se precisar de ajuda adicional."""
         try:
             hoje = datetime.now().date()
             
-            # Buscar estatísticas
-            total_clientes = len(self.db.listar_clientes(apenas_ativos=True)) if self.db else 0
+            # Buscar estatísticas - admin vê todos, usuário comum vê apenas seus
+            if self.is_admin(chat_id):
+                total_clientes = len(self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None)) if self.db else 0
+            else:
+                total_clientes = len(self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id)) if self.db else 0
             
             clientes_vencidos = []
             clientes_hoje = []
             clientes_proximos = []
             
             if self.db:
-                clientes = self.db.listar_clientes(apenas_ativos=True)
+                if self.is_admin(chat_id):
+                    clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None)
+                else:
+                    clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id)
                 for cliente in clientes:
                     dias_diferenca = (cliente['vencimento'] - hoje).days
                     if dias_diferenca < 0:
