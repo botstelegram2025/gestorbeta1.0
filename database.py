@@ -719,12 +719,22 @@ _Obrigado por escolher nossos serviços!_ ✨""",
             self._cache.clear()
             self._cache_ttl.clear()
     
-    def buscar_cliente_por_id(self, cliente_id):
-        """Busca cliente por ID"""
+    def buscar_cliente_por_id(self, cliente_id, chat_id_usuario=None):
+        """Busca cliente por ID - ISOLADO POR USUÁRIO"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute("""
+                    where_conditions = ["id = %s"]
+                    params = [cliente_id]
+                    
+                    # CRÍTICO: Filtrar por usuário para isolamento
+                    if chat_id_usuario is not None:
+                        where_conditions.append("chat_id_usuario = %s")
+                        params.append(chat_id_usuario)
+                    
+                    where_clause = " AND ".join(where_conditions)
+                    
+                    cursor.execute(f"""
                         SELECT 
                             id, nome, telefone, pacote, valor, servidor, vencimento,
                             ativo, data_cadastro, data_atualizacao, info_adicional,
@@ -732,8 +742,8 @@ _Obrigado por escolher nossos serviços!_ ✨""",
                             preferencias_notificacao,
                             (vencimento - CURRENT_DATE) as dias_vencimento
                         FROM clientes 
-                        WHERE id = %s
-                    """, (cliente_id,))
+                        WHERE {where_clause}
+                    """, params)
                     
                     cliente = cursor.fetchone()
                     return dict(cliente) if cliente else None
@@ -742,21 +752,31 @@ _Obrigado por escolher nossos serviços!_ ✨""",
             logger.error(f"Erro ao buscar cliente por ID: {e}")
             raise
     
-    def buscar_cliente_por_telefone(self, telefone):
-        """Busca cliente por telefone - retorna o primeiro encontrado"""
+    def buscar_cliente_por_telefone(self, telefone, chat_id_usuario=None):
+        """Busca cliente por telefone - ISOLADO POR USUÁRIO"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute("""
+                    where_conditions = ["telefone = %s", "ativo = TRUE"]
+                    params = [telefone]
+                    
+                    # CRÍTICO: Filtrar por usuário
+                    if chat_id_usuario is not None:
+                        where_conditions.append("chat_id_usuario = %s")
+                        params.append(chat_id_usuario)
+                    
+                    where_clause = " AND ".join(where_conditions)
+                    
+                    cursor.execute(f"""
                         SELECT 
                             id, nome, telefone, pacote, valor, servidor, vencimento,
-                            ativo, data_cadastro,
+                            ativo, data_cadastro, chat_id_usuario,
                             (vencimento - CURRENT_DATE) as dias_vencimento
                         FROM clientes 
-                        WHERE telefone = %s AND ativo = TRUE
+                        WHERE {where_clause}
                         ORDER BY data_cadastro DESC
                         LIMIT 1
-                    """, (telefone,))
+                    """, params)
                     
                     cliente = cursor.fetchone()
                     return dict(cliente) if cliente else None

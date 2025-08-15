@@ -1439,7 +1439,8 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
     def listar_clientes(self, chat_id):
         """Lista clientes com informações completas organizadas"""
         try:
-            clientes = self.db.listar_clientes(apenas_ativos=True)
+            # CORREÇÃO CRÍTICA: Filtrar clientes por usuário para isolamento completo
+            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id)
             
             if not clientes:
                 self.send_message(chat_id, 
