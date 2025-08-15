@@ -178,6 +178,49 @@ class TelegramBot:
         """Verifica se é o admin"""
         return str(chat_id) == ADMIN_CHAT_ID
     
+    def ensure_user_isolation(self, chat_id):
+        """Garantir isolamento de dados por usuário"""
+        try:
+            if self.is_admin(chat_id):
+                return True
+                
+            # Verificar se usuário existe e tem configurações
+            conn = self.db.get_connection()
+            with conn.cursor() as cursor:
+                # Verificar configurações do usuário
+                cursor.execute("""
+                    SELECT COUNT(*) FROM configuracoes 
+                    WHERE chat_id_usuario = %s
+                """, (chat_id,))
+                
+                configs_count = cursor.fetchone()[0]
+                
+                if configs_count == 0:
+                    # Criar configurações padrão para o usuário
+                    configs_default = [
+                        ('empresa_nome', 'Minha Empresa', 'Nome da empresa'),
+                        ('empresa_pix', '', 'Chave PIX para pagamentos'),
+                        ('empresa_telefone', '', 'Telefone de contato'),
+                        ('empresa_titular', '', 'Nome do titular PIX')
+                    ]
+                    
+                    for chave, valor, desc in configs_default:
+                        cursor.execute("""
+                            INSERT INTO configuracoes (chave, valor, descricao, chat_id_usuario)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT DO NOTHING
+                        """, (chave, valor, desc, chat_id))
+                    
+                    logger.info(f"✅ Configurações criadas para usuário {chat_id}")
+            
+            conn.commit()
+            conn.close()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro ao garantir isolamento do usuário {chat_id}: {e}")
+            return False
+    
     def criar_teclado_admin(self):
         """Cria o teclado administrativo"""
         return {
@@ -324,6 +367,9 @@ class TelegramBot:
                 logger.info(f"Processando estado de conversação para {chat_id}")
                 self.handle_conversation_state(chat_id, text, user_state)
                 return
+            
+            # Garantir isolamento de dados do usuário
+            self.ensure_user_isolation(chat_id)
             
             # Só depois verificar acesso para usuários sem estado de conversação
             if not self.is_admin(chat_id):
