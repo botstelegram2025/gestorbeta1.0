@@ -1389,7 +1389,7 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
                 cliente_id = self.db.criar_cliente(
                     dados['nome'], dados['telefone'], dados['plano'],
                     dados['valor'], dados['servidor'], dados['vencimento'],
-                    None,  # chat_id_usuario - será definido automaticamente como admin
+                    chat_id,  # CORRIGIDO: Passa o chat_id do usuário atual para isolamento
                     dados.get('info_adicional')
                 )
                 
