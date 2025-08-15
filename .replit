@@ -1,0 +1,77 @@
+modules = ["python-3.11", "postgresql-16", "nodejs-20", "python3"]
+
+[nix]
+channel = "stable-25_05"
+packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "tcl", "tk", "unzip", "zip", "zlib"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Install Dependencies"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Bot Telegram"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Baileys API Otimizado"
+
+[[workflows.workflow]]
+name = "Install Dependencies"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "uv add python-telegram-bot psycopg2-binary apscheduler pytz qrcode pillow requests python-dotenv"
+
+[[workflows.workflow]]
+name = "Bot Telegram"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python3 bot_complete.py"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Baileys API Otimizado"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd baileys-server && node server.js"
+waitForPort = 3000
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[deployment]
+deploymentTarget = "cloudrun"
+run = ["sh", "-c", "python3 app.py"]
+
+[[ports]]
+localPort = 3000
+externalPort = 3002
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 5001
+externalPort = 3000
+
+[[ports]]
+localPort = 5002
+externalPort = 3001
