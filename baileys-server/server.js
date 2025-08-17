@@ -12,17 +12,14 @@ const PORT = 3000;
 app.use(cors());
 app.use(express.json());
 
-// Estado global
-let sock;
-let qrCode = '';
-let isConnected = false;
-let connectionStatus = 'disconnected';
-let backupInterval;
+// Estado global para múltiplas sessões
+const sessions = new Map(); // sessionId -> { sock, qrCode, isConnected, status, backupInterval }
+let defaultSessionId = 'default';
 
-// Sistema de backup da sessão para PostgreSQL
-const saveSessionToDatabase = async () => {
+// Sistema de backup da sessão para PostgreSQL (por sessão específica)
+const saveSessionToDatabase = async (sessionId) => {
     try {
-        const authPath = './auth_info';
+        const authPath = `./auth_info_${sessionId}`;
         if (!fs.existsSync(authPath)) return;
 
         const files = fs.readdirSync(authPath);
@@ -36,31 +33,34 @@ const saveSessionToDatabase = async () => {
             }
         }
 
-        // Salvar no banco via API Python
+        // Salvar no banco via API Python com ID da sessão
         if (Object.keys(sessionData).length > 0) {
             await fetch('http://localhost:5000/api/session/backup', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session_data: sessionData })
+                body: JSON.stringify({ 
+                    session_data: sessionData,
+                    session_id: sessionId
+                })
             });
-            console.log('💾 Sessão salva no banco de dados');
+            console.log(`💾 Sessão ${sessionId} salva no banco de dados`);
         }
     } catch (error) {
-        console.log('⚠️ Erro ao salvar sessão:', error.message);
+        console.log(`⚠️ Erro ao salvar sessão ${sessionId}:`, error.message);
     }
 };
 
-// Restaurar sessão do banco de dados
-const restoreSessionFromDatabase = async () => {
+// Restaurar sessão do banco de dados (por sessão específica)
+const restoreSessionFromDatabase = async (sessionId) => {
     try {
-        const response = await fetch('http://localhost:5000/api/session/restore');
+        const response = await fetch(`http://localhost:5000/api/session/restore?session_id=${sessionId}`);
         if (response.ok) {
             const { session_data } = await response.json();
             
             if (session_data && Object.keys(session_data).length > 0) {
-                const authPath = './auth_info';
+                const authPath = `./auth_info_${sessionId}`;
                 if (!fs.existsSync(authPath)) {
-                    fs.mkdirSync(authPath);
+                    fs.mkdirSync(authPath, { recursive: true });
                 }
 
                 for (const [filename, content] of Object.entries(session_data)) {
@@ -68,148 +68,273 @@ const restoreSessionFromDatabase = async () => {
                     fs.writeFileSync(filePath, content);
                 }
                 
-                console.log('🔄 Sessão restaurada do banco de dados');
+                console.log(`🔄 Sessão ${sessionId} restaurada do banco de dados`);
                 return true;
             }
         }
     } catch (error) {
-        console.log('⚠️ Erro ao restaurar sessão:', error.message);
+        console.log(`⚠️ Erro ao restaurar sessão ${sessionId}:`, error.message);
     }
     return false;
 };
 
-// Função para conectar ao WhatsApp
-async function connectToWhatsApp() {
+// Função para conectar ao WhatsApp (por sessão específica)
+async function connectToWhatsApp(sessionId = defaultSessionId) {
     try {
-        console.log('🔄 Iniciando conexão com WhatsApp...');
+        console.log(`🔄 Iniciando conexão com WhatsApp para sessão ${sessionId}...`);
+        
+        // Criar ou obter dados da sessão
+        if (!sessions.has(sessionId)) {
+            sessions.set(sessionId, {
+                sock: null,
+                qrCode: '',
+                isConnected: false,
+                status: 'disconnected',
+                backupInterval: null
+            });
+        }
+        
+        const session = sessions.get(sessionId);
         
         // Primeiro tentar restaurar sessão do banco
-        await restoreSessionFromDatabase();
+        await restoreSessionFromDatabase(sessionId);
         
-        const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
+        const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${sessionId}`);
         
-        sock = makeWASocket({
+        session.sock = makeWASocket({
             auth: state,
             printQRInTerminal: false
         });
 
         // Salvar credenciais e backup automático
-        sock.ev.on('creds.update', async () => {
+        session.sock.ev.on('creds.update', async () => {
             await saveCreds();
-            // Fazer backup imediato a cada update das credenciais (crítico para Railway)
-            setTimeout(saveSessionToDatabase, 1000);
+            // Fazer backup imediato a cada update das credenciais
+            setTimeout(() => saveSessionToDatabase(sessionId), 1000);
         });
         
-        // Monitorar conexão (logs reduzidos)
-        sock.ev.on('connection.update', (update) => {
+        // Monitorar conexão
+        session.sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
             
-            if (connection !== connectionStatus) {
-                console.log('📱 Status da conexão:', connection);
+            if (connection !== session.status) {
+                console.log(`📱 Sessão ${sessionId} - Status:`, connection);
             }
             
             if (qr) {
-                console.log('📱 QR Code gerado!');
-                qrCode = qr;
-                connectionStatus = 'qr_ready';
+                console.log(`📱 QR Code gerado para sessão ${sessionId}!`);
+                session.qrCode = qr;
+                session.status = 'qr_ready';
             }
             
             if (connection === 'close') {
-                isConnected = false;
-                connectionStatus = 'disconnected';
+                session.isConnected = false;
+                session.status = 'disconnected';
                 
                 const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-                console.log('🔌 Conexão fechada. Reconectar?', shouldReconnect);
-                console.log('🔍 Status code:', (lastDisconnect?.error)?.output?.statusCode);
-                console.log('🔍 Disconnect reason:', DisconnectReason);
+                console.log(`🔌 Sessão ${sessionId} - Conexão fechada. Reconectar?`, shouldReconnect);
                 
-                // Se foi removido ou há conflito, aguardar mais tempo antes de reconectar
+                // Tratamento de reconexão específico por sessão
                 if ((lastDisconnect?.error)?.output?.statusCode === DisconnectReason.badSession ||
                     (lastDisconnect?.error)?.output?.statusCode === DisconnectReason.restartRequired ||
                     lastDisconnect?.error?.message?.includes('device_removed') ||
                     lastDisconnect?.error?.message?.includes('conflict')) {
-                    console.log('🧹 Aguardando devido a conflito/remoção...');
-                    qrCode = '';
-                    connectionStatus = 'disconnected';
-                    // Aguardar 30 segundos para evitar conflitos
-                    setTimeout(connectToWhatsApp, 30000);
+                    console.log(`🧹 Sessão ${sessionId} - Aguardando devido a conflito...`);
+                    session.qrCode = '';
+                    session.status = 'disconnected';
+                    setTimeout(() => connectToWhatsApp(sessionId), 30000);
                 } else if (shouldReconnect) {
-                    // Aguardar 10 segundos para reconexões normais
-                    setTimeout(connectToWhatsApp, 10000);
+                    setTimeout(() => connectToWhatsApp(sessionId), 10000);
                 }
             } else if (connection === 'open') {
-                isConnected = true;
-                connectionStatus = 'connected';
-                qrCode = '';
-                console.log('✅ WhatsApp conectado com sucesso!');
+                session.isConnected = true;
+                session.status = 'connected';
+                session.qrCode = '';
+                console.log(`✅ Sessão ${sessionId} - WhatsApp conectado!`);
                 
-                // Configurar backup automático a cada 2 minutos para maior frequência
-                if (backupInterval) clearInterval(backupInterval);
-                backupInterval = setInterval(saveSessionToDatabase, 2 * 60 * 1000);
+                // Configurar backup automático
+                if (session.backupInterval) clearInterval(session.backupInterval);
+                session.backupInterval = setInterval(() => saveSessionToDatabase(sessionId), 2 * 60 * 1000);
                 
                 // Fazer backup imediato após conectar
-                setTimeout(saveSessionToDatabase, 5000);
-                console.log('📞 Número:', sock.user.id);
+                setTimeout(() => saveSessionToDatabase(sessionId), 5000);
+                console.log(`📞 Sessão ${sessionId} - Número:`, session.sock.user.id);
             } else if (connection === 'connecting') {
-                if (connectionStatus !== 'connecting') {
-                    connectionStatus = 'connecting';
-                    console.log('🔄 Conectando...');
+                if (session.status !== 'connecting') {
+                    session.status = 'connecting';
+                    console.log(`🔄 Sessão ${sessionId} - Conectando...`);
+                }
+            } else if (connection === 'close') {
+                const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+                session.isConnected = false;
+                session.status = 'close';
+                session.qrCode = '';
+                
+                console.log(`🔌 Sessão ${sessionId} - Conexão fechada. Reconectar? ${shouldReconnect}`);
+                
+                if (shouldReconnect) {
+                    // Aguardar 3 segundos antes de reconectar
+                    setTimeout(() => {
+                        console.log(`🔄 Reconectando sessão ${sessionId} automaticamente...`);
+                        connectToWhatsApp(sessionId);
+                    }, 3000);
                 }
             }
         });
 
     } catch (error) {
-        console.error('❌ Erro ao conectar:', error);
-        connectionStatus = 'error';
+        console.error(`❌ Erro ao conectar sessão ${sessionId}:`, error);
+        const session = sessions.get(sessionId);
+        if (session) {
+            session.status = 'error';
+        }
     }
 }
 
 // Endpoints da API
 
-// Status da API
-app.get('/status', (req, res) => {
+// Status da API (com suporte a sessões específicas)
+app.get('/status/:sessionId', (req, res) => {
+    const sessionId = req.params.sessionId || defaultSessionId;
+    const session = sessions.get(sessionId);
+    
+    if (!session) {
+        return res.json({
+            connected: false,
+            status: 'not_initialized',
+            session: null,
+            qr_available: false,
+            timestamp: new Date().toISOString(),
+            session_id: sessionId
+        });
+    }
+    
     res.json({
-        connected: isConnected,
-        status: connectionStatus,
-        session: sock?.user?.id || null,
-        qr_available: qrCode !== '',
-        timestamp: new Date().toISOString()
+        connected: session.isConnected,
+        status: session.status,
+        session: session.sock?.user?.id || null,
+        qr_available: session.qrCode !== '',
+        timestamp: new Date().toISOString(),
+        session_id: sessionId
     });
 });
 
-// Obter QR Code
+// Endpoints de compatibilidade sem parâmetros obrigatórios
+app.get('/status', (req, res) => {
+    const sessionId = req.query.sessionId || defaultSessionId;
+    const session = sessions.get(sessionId);
+    
+    if (!session) {
+        return res.json({
+            connected: false,
+            status: 'not_initialized',
+            session: null,
+            qr_available: false,
+            timestamp: new Date().toISOString(),
+            session_id: sessionId
+        });
+    }
+    
+    res.json({
+        connected: session.isConnected,
+        status: session.status,
+        session: session.sock?.user?.id || null,
+        qr_available: session.qrCode !== '',
+        timestamp: new Date().toISOString(),
+        session_id: sessionId
+    });
+});
+
 app.get('/qr', async (req, res) => {
     try {
-        if (!qrCode) {
+        const sessionId = req.query.sessionId || defaultSessionId;
+        
+        // Inicializar sessão se não existir
+        if (!sessions.has(sessionId)) {
+            await connectToWhatsApp(sessionId);
+            // Aguardar um pouco para QR ser gerado
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+        
+        const session = sessions.get(sessionId);
+        
+        if (!session || !session.qrCode) {
             return res.status(404).json({ 
                 success: false, 
-                error: 'QR Code não disponível. Tente reconectar.' 
+                error: `QR Code não disponível para sessão ${sessionId}. Tente reconectar.`,
+                session_id: sessionId
             });
         }
 
         // Gerar imagem QR Code
-        const qrImage = await QRCode.toDataURL(qrCode);
+        const qrImage = await QRCode.toDataURL(session.qrCode);
         
         res.json({
             success: true,
-            qr: qrCode,
+            qr: session.qrCode,
             qr_image: qrImage,
-            instructions: 'Abra WhatsApp → Configurações → Aparelhos conectados → Conectar um aparelho'
+            instructions: 'Abra WhatsApp → Configurações → Aparelhos conectados → Conectar um aparelho',
+            session_id: sessionId
         });
         
     } catch (error) {
         console.error('❌ Erro ao gerar QR:', error);
         res.status(500).json({ 
             success: false, 
-            error: 'Erro ao gerar QR Code' 
+            error: 'Erro ao gerar QR Code',
+            session_id: req.query.sessionId || defaultSessionId
         });
     }
 });
 
-// Enviar mensagem
+// Obter QR Code (com suporte a sessões específicas)
+app.get('/qr/:sessionId', async (req, res) => {
+    try {
+        const sessionId = req.params.sessionId || defaultSessionId;
+        
+        // Inicializar sessão se não existir
+        if (!sessions.has(sessionId)) {
+            await connectToWhatsApp(sessionId);
+            // Aguardar um pouco para QR ser gerado
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+        
+        const session = sessions.get(sessionId);
+        
+        if (!session || !session.qrCode) {
+            return res.status(404).json({ 
+                success: false, 
+                error: `QR Code não disponível para sessão ${sessionId}. Tente reconectar.`,
+                session_id: sessionId
+            });
+        }
+
+        // Gerar imagem QR Code
+        const qrImage = await QRCode.toDataURL(session.qrCode);
+        
+        res.json({
+            success: true,
+            qr: session.qrCode,
+            qr_image: qrImage,
+            instructions: 'Abra WhatsApp → Configurações → Aparelhos conectados → Conectar um aparelho',
+            session_id: sessionId
+        });
+        
+    } catch (error) {
+        console.error('❌ Erro ao gerar QR:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Erro ao gerar QR Code',
+            session_id: req.params.sessionId || defaultSessionId
+        });
+    }
+});
+
+// Enviar mensagem (com suporte a sessões específicas)
 app.post('/send-message', async (req, res) => {
     try {
-        const { number, message } = req.body;
+        const { number, message, session_id } = req.body;
+        const sessionId = session_id || defaultSessionId;
         
         if (!number || !message) {
             return res.status(400).json({
@@ -218,10 +343,13 @@ app.post('/send-message', async (req, res) => {
             });
         }
         
-        if (!isConnected) {
+        const session = sessions.get(sessionId);
+        
+        if (!session || !session.isConnected) {
             return res.status(400).json({
                 success: false,
-                error: 'WhatsApp não conectado'
+                error: `WhatsApp não conectado para sessão ${sessionId}`,
+                session_id: sessionId
             });
         }
         
@@ -229,91 +357,168 @@ app.post('/send-message', async (req, res) => {
         const jid = number.includes('@') ? number : `${number}@s.whatsapp.net`;
         
         // Enviar mensagem
-        const result = await sock.sendMessage(jid, { text: message });
+        const result = await session.sock.sendMessage(jid, { text: message });
         
-        console.log('✅ Mensagem enviada:', number, message.substring(0, 50) + '...');
+        console.log(`✅ Mensagem enviada via sessão ${sessionId}:`, number, message.substring(0, 50) + '...');
         
         res.json({
             success: true,
             messageId: result.key.id,
+            timestamp: new Date().toISOString(),
+            session_id: sessionId
+        });
+        
+    } catch (error) {
+        console.error(`❌ Erro ao enviar mensagem via sessão ${sessionId}:`, error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            session_id: sessionId
+        });
+    }
+});
+
+// Reconectar (com suporte a sessões específicas)
+app.post('/reconnect/:sessionId', async (req, res) => {
+    try {
+        const sessionId = req.params.sessionId || defaultSessionId;
+        console.log(`🔄 Reconectando sessão ${sessionId}...`);
+        
+        // Limpar sessão existente
+        if (sessions.has(sessionId)) {
+            const session = sessions.get(sessionId);
+            if (session.sock) {
+                session.sock.end();
+            }
+            if (session.backupInterval) {
+                clearInterval(session.backupInterval);
+            }
+            sessions.delete(sessionId);
+        }
+        
+        // Iniciar nova conexão
+        setTimeout(() => connectToWhatsApp(sessionId), 1000);
+        
+        res.json({
+            success: true,
+            message: `Reconexão iniciada para sessão ${sessionId}`,
+            session_id: sessionId
+        });
+        
+    } catch (error) {
+        console.error(`❌ Erro ao reconectar sessão ${sessionId}:`, error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            session_id: sessionId
+        });
+    }
+});
+
+// Limpar sessão específica
+app.post('/clear-session/:sessionId', async (req, res) => {
+    try {
+        const sessionId = req.params.sessionId || defaultSessionId;
+        console.log(`🧹 Limpando sessão ${sessionId}...`);
+        
+        if (sessions.has(sessionId)) {
+            const session = sessions.get(sessionId);
+            if (session.sock) {
+                session.sock.end();
+            }
+            if (session.backupInterval) {
+                clearInterval(session.backupInterval);
+            }
+            sessions.delete(sessionId);
+        }
+        
+        // Limpar auth_info específico da sessão
+        const authPath = `./auth_info_${sessionId}`;
+        if (fs.existsSync(authPath)) {
+            fs.rmSync(authPath, { recursive: true });
+        }
+        
+        res.json({
+            success: true,
+            message: `Sessão ${sessionId} limpa com sucesso`,
+            session_id: sessionId
+        });
+        
+    } catch (error) {
+        console.error(`❌ Erro ao limpar sessão ${sessionId}:`, error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            session_id: sessionId
+        });
+    }
+});
+
+// Endpoint de reconectar compatível
+app.post('/reconnect', async (req, res) => {
+    try {
+        const sessionId = req.body.sessionId || req.query.sessionId || defaultSessionId;
+        console.log(`🔄 Reconectando sessão ${sessionId}...`);
+        
+        // Limpar sessão existente
+        if (sessions.has(sessionId)) {
+            const session = sessions.get(sessionId);
+            if (session.sock) {
+                session.sock.end();
+            }
+            if (session.backupInterval) {
+                clearInterval(session.backupInterval);
+            }
+            sessions.delete(sessionId);
+        }
+        
+        // Iniciar nova conexão
+        setTimeout(() => connectToWhatsApp(sessionId), 1000);
+        
+        res.json({
+            success: true,
+            message: `Reconexão iniciada para sessão ${sessionId}`,
+            session_id: sessionId
+        });
+        
+    } catch (error) {
+        console.error(`❌ Erro ao reconectar sessão ${sessionId}:`, error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            session_id: sessionId
+        });
+    }
+});
+
+// Listar todas as sessões ativas
+app.get('/sessions', (req, res) => {
+    try {
+        const sessionsData = [];
+        
+        for (const [sessionId, session] of sessions.entries()) {
+            sessionsData.push({
+                session_id: sessionId,
+                connected: session.isConnected,
+                status: session.status,
+                qr_available: session.qrCode !== '',
+                phone_number: session.sock?.user?.id || null,
+                last_seen: new Date().toISOString()
+            });
+        }
+        
+        res.json({
+            success: true,
+            total_sessions: sessionsData.length,
+            sessions: sessionsData,
             timestamp: new Date().toISOString()
         });
         
     } catch (error) {
-        console.error('❌ Erro ao enviar mensagem:', error);
+        console.error('❌ Erro ao listar sessões:', error);
         res.status(500).json({
             success: false,
             error: error.message
-        });
-    }
-});
-
-// Reconectar
-app.post('/reconnect', async (req, res) => {
-    try {
-        console.log('🔄 Reconectando...');
-        qrCode = '';
-        isConnected = false;
-        connectionStatus = 'connecting';
-        
-        if (sock) {
-            sock.end();
-        }
-        
-        setTimeout(connectToWhatsApp, 1000);
-        
-        res.json({
-            success: true,
-            message: 'Reconexão iniciada'
-        });
-        
-    } catch (error) {
-        console.error('❌ Erro ao reconectar:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// Limpar sessão
-app.post('/clear-session', async (req, res) => {
-    try {
-        console.log('🧹 Limpando sessão...');
-        
-        if (sock) {
-            sock.end();
-        }
-        
-        // Limpar auth_info
-        const fs = require('fs');
-        const path = require('path');
-        const authDir = './auth_info';
-        
-        if (fs.existsSync(authDir)) {
-            const files = fs.readdirSync(authDir);
-            for (const file of files) {
-                fs.unlinkSync(path.join(authDir, file));
-            }
-        }
-        
-        qrCode = '';
-        isConnected = false;
-        connectionStatus = 'disconnected';
-        
-        // Reconectar após limpar
-        setTimeout(connectToWhatsApp, 1000);
-        
-        res.json({ 
-            success: true, 
-            message: 'Sessão limpa e reconexão iniciada'
-        });
-        
-    } catch (error) {
-        console.error('❌ Erro ao limpar sessão:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: 'Erro ao limpar sessão' 
         });
     }
 });
@@ -321,9 +526,9 @@ app.post('/clear-session', async (req, res) => {
 // Health check
 app.get('/', (req, res) => {
     res.json({
-        service: 'Baileys API',
+        service: 'Baileys API Multi-Session',
         status: 'running',
-        connected: isConnected,
+        total_sessions: sessions.size,
         timestamp: new Date().toISOString()
     });
 });
@@ -335,18 +540,16 @@ app.listen(PORT, () => {
     console.log(`🔗 QR Code: http://localhost:${PORT}/qr`);
     console.log('');
     
-    // Inicializar com restauração de sessão
-    (async () => {
-        // Tentar restaurar sessão do banco antes de conectar
-        const restored = await restoreSessionFromDatabase();
-        if (restored) {
-            console.log('🔄 Sessão restaurada, iniciando conexão...');
-        } else {
-            console.log('📱 Nenhuma sessão encontrada, nova conexão será iniciada');
-        }
-        
-        connectToWhatsApp();
-    })();
+    // Inicializar sistema multi-sessão
+    console.log('📱 Sistema multi-sessão Baileys inicializado');
+    console.log('📋 Endpoints disponíveis:');
+    console.log('   GET  /status/:sessionId - Status da sessão');
+    console.log('   GET  /qr/:sessionId - QR Code da sessão');
+    console.log('   POST /send-message - Enviar mensagem');
+    console.log('   POST /reconnect/:sessionId - Reconectar sessão');
+    console.log('   POST /clear-session/:sessionId - Limpar sessão');
+    console.log('   GET  /sessions - Listar todas as sessões');
+    console.log('');
 });
 
 // Tratamento de erros
