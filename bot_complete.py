@@ -1287,8 +1287,9 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
         user_state['dados']['plano'] = text
         user_state['dados']['meses'] = meses
         
-        # Calcular data de vencimento automaticamente
-        vencimento = datetime.now().date() + timedelta(days=meses * 30)
+        # Calcular data de vencimento automaticamente usando meses corretos
+        data_hoje = datetime.now().date()
+        vencimento = self.calcular_vencimento_meses(data_hoje, meses)
         user_state['dados']['vencimento_auto'] = vencimento
         
         user_state['step'] = 'valor'
@@ -1850,6 +1851,10 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
             elif callback_data.startswith('renovar_30dias_'):
                 cliente_id = int(callback_data.split('_')[2])
                 self.processar_renovacao_30dias(chat_id, cliente_id)
+            
+            elif callback_data.startswith('renovar_proximo_mes_'):
+                cliente_id = int(callback_data.split('_')[3])
+                self.processar_renovacao_proximo_mes(chat_id, cliente_id)
             
             elif callback_data.startswith('renovar_nova_data_'):
                 cliente_id = int(callback_data.split('_')[3])
@@ -2744,6 +2749,51 @@ Info: {info_adicional}
             logger.error(f"Erro ao iniciar edição: {e}")
             self.send_message(chat_id, "❌ Erro ao carregar dados do cliente.")
     
+    def calcular_proximo_mes(self, data_atual):
+        """Calcula o próximo mês mantendo o mesmo dia"""
+        from calendar import monthrange
+        
+        # Se o mês atual é dezembro, vai para janeiro do próximo ano
+        if data_atual.month == 12:
+            proximo_ano = data_atual.year + 1
+            proximo_mes = 1
+        else:
+            proximo_ano = data_atual.year
+            proximo_mes = data_atual.month + 1
+        
+        # Verificar se o dia existe no próximo mês
+        dia = data_atual.day
+        dias_no_proximo_mes = monthrange(proximo_ano, proximo_mes)[1]
+        
+        # Se o dia não existe (ex: 31 de março para 30 de abril), usar o último dia do mês
+        if dia > dias_no_proximo_mes:
+            dia = dias_no_proximo_mes
+            
+        return datetime(proximo_ano, proximo_mes, dia).date()
+    
+    def calcular_vencimento_meses(self, data_inicial, meses):
+        """Calcula data de vencimento adicionando N meses corretamente"""
+        from calendar import monthrange
+        
+        ano = data_inicial.year
+        mes = data_inicial.month
+        dia = data_inicial.day
+        
+        # Adicionar os meses
+        mes += meses
+        
+        # Ajustar ano se necessário
+        while mes > 12:
+            ano += 1
+            mes -= 12
+        
+        # Verificar se o dia existe no mês final
+        dias_no_mes_final = monthrange(ano, mes)[1]
+        if dia > dias_no_mes_final:
+            dia = dias_no_mes_final
+            
+        return datetime(ano, mes, dia).date()
+    
     def renovar_cliente(self, chat_id, cliente_id):
         """Pergunta ao usuário sobre o tipo de renovação"""
         try:
@@ -2753,7 +2803,8 @@ Info: {info_adicional}
                 return
             
             vencimento_atual = cliente['vencimento']
-            novo_vencimento_30 = vencimento_atual + timedelta(days=30)
+            # Usar a nova função para calcular o próximo mês corretamente
+            novo_vencimento_mes = self.calcular_proximo_mes(vencimento_atual)
             
             mensagem = f"""🔄 *RENOVAR CLIENTE*
 
@@ -2762,8 +2813,8 @@ Info: {info_adicional}
 
 🤔 *Como deseja renovar?*
 
-📅 *Opção 1:* Renovar com mesma data (+30 dias)
-   Novo vencimento: {novo_vencimento_30.strftime('%d/%m/%Y')}
+📅 *Opção 1:* Renovar mantendo o mesmo dia do próximo mês
+   Novo vencimento: {novo_vencimento_mes.strftime('%d/%m/%Y')}
 
 📅 *Opção 2:* Definir nova data de vencimento
    Escolha uma data personalizada
@@ -2772,7 +2823,7 @@ Escolha uma das opções abaixo:"""
             
             inline_keyboard = [
                 [
-                    {'text': '📅 Mesma Data (+30 dias)', 'callback_data': f'renovar_30dias_{cliente_id}'},
+                    {'text': '📅 Mesmo Dia do Próximo Mês', 'callback_data': f'renovar_proximo_mes_{cliente_id}'},
                     {'text': '📅 Nova Data', 'callback_data': f'renovar_nova_data_{cliente_id}'}
                 ],
                 [
@@ -2788,8 +2839,88 @@ Escolha uma das opções abaixo:"""
             logger.error(f"Erro ao mostrar opções de renovação: {e}")
             self.send_message(chat_id, "❌ Erro ao carregar opções de renovação.")
     
+    def processar_renovacao_proximo_mes(self, chat_id, cliente_id):
+        """Renova cliente para o mesmo dia do próximo mês"""
+        try:
+            cliente = self.db.buscar_cliente_por_id(cliente_id)
+            if not cliente:
+                self.send_message(chat_id, "❌ Cliente não encontrado.")
+                return
+            
+            # Calcular nova data de vencimento mantendo o mesmo dia do próximo mês
+            vencimento_atual = cliente['vencimento']
+            novo_vencimento = self.calcular_proximo_mes(vencimento_atual)
+            
+            # Atualizar no banco
+            self.db.atualizar_vencimento_cliente(cliente_id, novo_vencimento)
+            
+            # CANCELAR AUTOMATICAMENTE MENSAGENS PENDENTES NA FILA
+            mensagens_canceladas = 0
+            if self.scheduler:
+                mensagens_canceladas = self.scheduler.cancelar_mensagens_cliente_renovado(cliente_id)
+                logger.info(f"Cliente {cliente['nome']} renovado: {mensagens_canceladas} mensagens canceladas da fila")
+            else:
+                logger.warning("Scheduler não disponível para cancelar mensagens")
+            
+            # Verificar se existe template de renovação
+            template_renovacao = None
+            if self.template_manager:
+                templates = self.template_manager.listar_templates()
+                for template in templates:
+                    if template.get('tipo') == 'renovacao':
+                        template_renovacao = template
+                        break
+            
+            # Perguntar se deseja enviar mensagem de renovação
+            mensagem = f"""✅ *CLIENTE RENOVADO COM SUCESSO!*
+
+👤 *{cliente['nome']}*
+📅 Vencimento anterior: *{vencimento_atual.strftime('%d/%m/%Y')}*
+📅 Novo vencimento: *{novo_vencimento.strftime('%d/%m/%Y')}*
+
+🎉 Cliente renovado mantendo o mesmo dia do próximo mês!"""
+            
+            # Adicionar informação sobre cancelamento de mensagens se houve
+            if mensagens_canceladas > 0:
+                mensagem += f"\n🔄 {mensagens_canceladas} mensagem(s) pendente(s) cancelada(s) automaticamente"
+            
+            # Sempre perguntar se deseja enviar mensagem de renovação
+            mensagem += "\n\n📱 *Deseja enviar mensagem de renovação para o cliente?*"
+            
+            # Criar botões de ação
+            inline_keyboard = []
+            
+            if template_renovacao:
+                inline_keyboard.append([
+                    {'text': '✅ Sim, Enviar Mensagem de Renovação', 'callback_data': f'enviar_renovacao_{cliente_id}_{template_renovacao["id"]}'},
+                    {'text': '❌ Não Enviar', 'callback_data': f'cliente_detalhes_{cliente_id}'}
+                ])
+            else:
+                inline_keyboard.append([
+                    {'text': '💬 Enviar Mensagem Manual', 'callback_data': f'enviar_mensagem_{cliente_id}'},
+                    {'text': '❌ Não Enviar', 'callback_data': f'cliente_detalhes_{cliente_id}'}
+                ])
+            
+            inline_keyboard.extend([
+                [
+                    {'text': '📋 Ver Cliente', 'callback_data': f'cliente_detalhes_{cliente_id}'},
+                    {'text': '🔙 Lista Clientes', 'callback_data': 'menu_clientes'}
+                ],
+                [
+                    {'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}
+                ]
+            ])
+            
+            self.send_message(chat_id, mensagem,
+                parse_mode='Markdown',
+                reply_markup={'inline_keyboard': inline_keyboard})
+            
+        except Exception as e:
+            logger.error(f"Erro ao processar renovação: {e}")
+            self.send_message(chat_id, "❌ Erro ao processar renovação.")
+    
     def processar_renovacao_30dias(self, chat_id, cliente_id):
-        """Renova cliente por mais 30 dias a partir do vencimento atual"""
+        """Renova cliente por mais 30 dias a partir do vencimento atual (MÉTODO LEGACY)"""
         try:
             cliente = self.db.buscar_cliente_por_id(cliente_id)
             if not cliente:
@@ -2833,21 +2964,29 @@ Escolha uma das opções abaixo:"""
             if mensagens_canceladas > 0:
                 mensagem += f"\n🔄 {mensagens_canceladas} mensagem(s) pendente(s) cancelada(s) automaticamente"
             
+            # Perguntar se deseja enviar mensagem de renovação
+            mensagem += "\n\n📱 *Deseja enviar mensagem de renovação para o cliente?*"
+            
             # Criar botões de ação
             inline_keyboard = []
             
             if template_renovacao:
                 inline_keyboard.append([
-                    {'text': '📱 Enviar Mensagem de Renovação', 'callback_data': f'enviar_renovacao_{cliente_id}_{template_renovacao["id"]}'}
+                    {'text': '✅ Sim, Enviar Mensagem de Renovação', 'callback_data': f'enviar_renovacao_{cliente_id}_{template_renovacao["id"]}'},
+                    {'text': '❌ Não Enviar', 'callback_data': f'cliente_detalhes_{cliente_id}'}
+                ])
+            else:
+                inline_keyboard.append([
+                    {'text': '💬 Enviar Mensagem Manual', 'callback_data': f'enviar_mensagem_{cliente_id}'},
+                    {'text': '❌ Não Enviar', 'callback_data': f'cliente_detalhes_{cliente_id}'}
                 ])
             
             inline_keyboard.extend([
                 [
-                    {'text': '💬 Enviar Outra Mensagem', 'callback_data': f'enviar_mensagem_{cliente_id}'},
-                    {'text': '📋 Ver Cliente', 'callback_data': f'cliente_detalhes_{cliente_id}'}
+                    {'text': '📋 Ver Cliente', 'callback_data': f'cliente_detalhes_{cliente_id}'},
+                    {'text': '🔙 Lista Clientes', 'callback_data': 'menu_clientes'}
                 ],
                 [
-                    {'text': '🔙 Lista Clientes', 'callback_data': 'menu_clientes'},
                     {'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}
                 ]
             ])
@@ -3008,9 +3147,9 @@ Exemplo: 15/10/2025"""
                 cliente
             )
             
-            # Enviar via WhatsApp
+            # Enviar via WhatsApp com isolamento por usuário
             telefone_formatado = f"55{cliente['telefone']}"
-            resultado = self.baileys_api.send_message(telefone_formatado, mensagem_processada)
+            resultado = self.baileys_api.send_message(telefone_formatado, mensagem_processada, chat_id)
             
             if resultado.get('success'):
                 # Registrar log de envio
@@ -8409,14 +8548,19 @@ Exemplos comuns:
                 "Verifique se a API está rodando em localhost:3000")
     
     def gerar_qr_whatsapp(self, chat_id):
-        """Gera e exibe QR Code para conectar WhatsApp"""
+        """Gera e exibe QR Code para conectar WhatsApp específico do usuário"""
         try:
-            # Primeiro verificar o status da conexão
+            # Primeiro verificar se há API Baileys disponível
+            if not self.baileys_api:
+                self.send_message(chat_id, 
+                    "❌ API WhatsApp não inicializada.\n\n"
+                    "Entre em contato com o administrador.")
+                return
+            
+            # Verificar o status da conexão específica do usuário
             try:
-                status_response = requests.get("http://localhost:3000/status", timeout=10)
-                if status_response.status_code == 200:
-                    status_data = status_response.json()
-                    is_connected = status_data.get('connected', False)
+                status_data = self.baileys_api.get_status(chat_id)
+                if status_data and not status_data.get('qr_needed', True):
                     
                     # Se já está conectado, mostrar informações da conexão
                     if is_connected:
@@ -8457,12 +8601,12 @@ Exemplos comuns:
             self.send_message(chat_id, "🔄 *Gerando QR Code...*\n\nAguarde um momento.", parse_mode='Markdown')
             
             try:
-                # Tentar obter QR code da API Baileys
-                response = requests.get("http://localhost:3000/qr", timeout=15)
+                # Tentar obter QR code específico do usuário
+                qr_result = self.baileys_api.generate_qr_code(chat_id)
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    qr_code = data.get('qr')
+                if qr_result.get('success'):
+                    qr_code = qr_result.get('qr_code')
+                    qr_image = qr_result.get('qr_image')
                     
                     if qr_code:
                         mensagem = """📱 *QR CODE WHATSAPP GERADO*
@@ -8478,8 +8622,7 @@ Exemplos comuns:
                         # Enviar instruções primeiro
                         self.send_message(chat_id, mensagem, parse_mode='Markdown')
                         
-                        # Enviar o QR code como imagem
-                        qr_image = data.get('qr_image')
+                        # Enviar o QR code como imagem (se disponível)
                         
                         if qr_image:
                             # Converter base64 para bytes e enviar como foto
@@ -8533,9 +8676,9 @@ Exemplos comuns:
                                         reply_markup={'inline_keyboard': inline_keyboard})
                         return
                     else:
-                        error_msg = "QR Code não retornado pela API"
+                        error_msg = qr_result.get('error', 'QR Code não retornado pela API')
                 else:
-                    error_msg = f"API retornou status {response.status_code}"
+                    error_msg = qr_result.get('error', 'Erro ao gerar QR Code')
             
             except requests.exceptions.ConnectionError:
                 error_msg = "API Baileys não está rodando (localhost:3000)"
@@ -8617,60 +8760,45 @@ _Mensagem automática de teste do bot_ 🤖"""
             
             self.send_message(chat_id, f"📤 Enviando teste para {cliente['nome']} ({telefone})...")
             
-            # Enviar via Baileys API
+            # Enviar via Baileys API com isolamento por usuário
             try:
-                payload = {
-                    'number': telefone,
-                    'message': mensagem
-                }
+                resultado = self.baileys_api.send_message(telefone, mensagem, chat_id)
                 
-                response = requests.post("http://localhost:3000/send-message", 
-                                       json=payload, timeout=30)
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    if result.get('success'):
-                        # Sucesso no envio
-                        self.send_message(chat_id, 
-                            f"✅ *Teste enviado com sucesso!*\n\n"
-                            f"📱 *Para:* {cliente['nome']}\n"
-                            f"📞 *Número:* {telefone}\n"
-                            f"📤 *Via:* WhatsApp/Baileys\n\n"
-                            f"🕐 *Enviado em:* {datetime.now().strftime('%H:%M:%S')}")
-                        
-                        # Registrar no log se DB disponível
-                        if self.db:
-                            self.db.registrar_envio(
-                                cliente_id=cliente['id'],
-                                template_id=None,
-                                telefone=telefone,
-                                mensagem=mensagem,
-                                tipo_envio='teste_manual',
-                                sucesso=True,
-                                message_id=result.get('messageId')
-                            )
-                    else:
-                        error_msg = result.get('error', 'Erro desconhecido')
-                        self.send_message(chat_id, 
-                            f"❌ *Falha no envio*\n\n"
-                            f"Erro: {error_msg}")
-                else:
+                if resultado.get('success'):
+                    # Sucesso no envio
                     self.send_message(chat_id, 
-                        f"❌ *Erro na API*\n\n"
-                        f"Status Code: {response.status_code}")
+                        f"✅ *Teste enviado com sucesso!*\n\n"
+                        f"📱 *Para:* {cliente['nome']}\n"
+                        f"📞 *Número:* {telefone}\n"
+                        f"📤 *Via:* WhatsApp/Baileys\n\n"
+                        f"🕐 *Enviado em:* {datetime.now().strftime('%H:%M:%S')}")
+                    
+                    # Registrar no log se DB disponível
+                    if self.db:
+                        self.db.registrar_envio(
+                            cliente_id=cliente['id'],
+                            template_id=None,
+                            telefone=telefone,
+                            mensagem=mensagem,
+                            tipo_envio='teste_manual',
+                            sucesso=True,
+                            message_id=resultado.get('messageId')
+                        )
+                else:
+                    error_msg = resultado.get('error', 'Erro desconhecido')
+                    self.send_message(chat_id, 
+                        f"❌ *Falha no envio*\n\n"
+                        f"Erro: {error_msg}")
                         
-            except requests.exceptions.Timeout:
-                self.send_message(chat_id, 
-                    "⏰ *Timeout no envio*\n\n"
-                    "O envio demorou muito para responder. Verifique a conexão com a API.")
             except Exception as api_error:
                 logger.error(f"Erro na API Baileys: {api_error}")
                 self.send_message(chat_id, 
                     f"❌ *Erro na comunicação com WhatsApp*\n\n"
                     f"Verifique se:\n"
-                    f"• WhatsApp está conectado\n"
+                    f"• WhatsApp está conectado para seu usuário\n"
                     f"• Número está correto\n"
-                    f"• API Baileys funcionando")
+                    f"• API Baileys funcionando\n\n"
+                    f"Erro: {str(api_error)}")
         
         except Exception as e:
             logger.error(f"Erro no teste de envio: {e}")
@@ -10264,7 +10392,7 @@ Confirma o envio da cobrança geral?"""
             if self.baileys_api:
                 try:
                     logger.info(f"[RAILWAY] Enviando mensagem WhatsApp para {telefone}")
-                    resultado = self.baileys_api.send_message(telefone, mensagem)
+                    resultado = self.baileys_api.send_message(telefone, mensagem, chat_id)
                     if resultado['success']:
                         sucesso = True
                         
@@ -11055,7 +11183,7 @@ def confirmar_envio_mensagem_global(chat_id, cliente_id, template_id):
         if telegram_bot.baileys_api:
             try:
                 logger.info(f"Enviando mensagem WhatsApp para {telefone}")
-                resultado = telegram_bot.baileys_api.send_message(telefone, mensagem)
+                resultado = telegram_bot.baileys_api.send_message(telefone, mensagem, chat_id)
                 if resultado['success']:
                     sucesso = True
                     

@@ -224,41 +224,30 @@ class BaileysAPI:
         """Gera QR Code para conexão específica do usuário"""
         try:
             session_name = self.get_user_session(chat_id_usuario)
-            response = self._make_request(f'qr/{session_name}', 'POST')
             
-            if response.get('success'):
-                qr_data = response.get('data', {})
-                qr_string = qr_data.get('qr')
-                
-                if qr_string:
-                    # Gerar imagem QR Code
-                    qr = qrcode.QRCode(
-                        version=1,
-                        error_correction=qrcode.constants.ERROR_CORRECT_L,
-                        box_size=10,
-                        border=4,
-                    )
-                    qr.add_data(qr_string)
-                    qr.make(fit=True)
-                    
-                    # Criar imagem
-                    img = qr.make_image(fill_color="black", back_color="white")
-                    
-                    # Converter para bytes
-                    img_buffer = BytesIO()
-                    img.save(img_buffer, format='PNG')
-                    img_buffer.seek(0)
-                    
+            # Por enquanto usar endpoint padrão até implementar sessões separadas no Node.js
+            response = requests.get(f"{self.base_url}/qr", timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
                     return {
                         'success': True,
-                        'qr_code': img_buffer.getvalue(),
-                        'qr_string': qr_string,
-                        'expires_in': qr_data.get('timeout', 20)
+                        'qr_code': data.get('qr'),
+                        'qr_image': data.get('qr_image'),
+                        'session': session_name,
+                        'instructions': data.get('instructions', '')
                     }
                 else:
-                    return {'success': False, 'error': 'QR Code não disponível'}
+                    return {
+                        'success': False,
+                        'error': data.get('error', 'QR Code não disponível')
+                    }
             else:
-                return response
+                return {
+                    'success': False,
+                    'error': f'API retornou status {response.status_code}'
+                }
                 
         except Exception as e:
             logger.error(f"Erro ao gerar QR Code: {e}")
@@ -272,36 +261,43 @@ class BaileysAPI:
             if not clean_phone:
                 return {'success': False, 'error': 'Número de telefone inválido'}
             
-            # Preparar dados da mensagem com sessão do usuário
-            session_name = self.get_user_session(chat_id_usuario)
+            # Preparar dados da mensagem (por enquanto sem sessão específica)
             data = {
                 'number': clean_phone,
-                'message': message,
-                'session': session_name
+                'message': message
             }
             
             # Opções adicionais
             if options:
                 data.update(options)
             
-            # Enviar mensagem
-            response = self._make_request('send-message', 'POST', data)
+            # Enviar mensagem via endpoint padrão
+            response = requests.post(f"{self.base_url}/send-message", 
+                                   json=data, timeout=30)
             
-            if response.get('success'):
-                message_data = response.get('data', {})
-                
-                # Aguardar delay configurado
-                if self.message_delay > 0:
-                    time.sleep(self.message_delay)
-                
-                return {
-                    'success': True,
-                    'message_id': message_data.get('id'),
-                    'status': message_data.get('status', 'sent'),
-                    'timestamp': message_data.get('timestamp', time.time())
-                }
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    # Aguardar delay configurado
+                    if self.message_delay > 0:
+                        time.sleep(self.message_delay)
+                    
+                    return {
+                        'success': True,
+                        'messageId': result.get('messageId'),
+                        'status': 'sent',
+                        'timestamp': result.get('timestamp', time.time())
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': result.get('error', 'Erro desconhecido')
+                    }
             else:
-                return response
+                return {
+                    'success': False,
+                    'error': f'API retornou status {response.status_code}'
+                }
                 
         except Exception as e:
             logger.error(f"Erro ao enviar mensagem: {e}")
