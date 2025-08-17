@@ -12,7 +12,19 @@ Search interface: Client search results should use the same format as client lis
 Button display format: Client buttons throughout the system display "name + expiration date" format instead of "name + ID" for better usability.
 Phone number format: All phone numbers are automatically standardized to Baileys WhatsApp format (DDD12345678 - 10 digits total) regardless of input format. Modern 9-digit numbers have the first 9 removed for Baileys compatibility.
 
-## Recent Changes (2025-08-16)
+## Recent Changes (2025-08-17)
+- **CORREÇÕES CRÍTICAS DE SEGURANÇA MULTI-TENANT**: Aplicadas correções fundamentais para isolamento de dados entre usuários
+- **VIOLAÇÃO DE EXCLUSÃO CORRIGIDA**: Função `excluir_cliente` agora verifica ownership do usuário antes de permitir exclusão, impedindo que usuários excluam clientes de outros
+- **VIOLAÇÃO DE LISTAGEM CORRIGIDA**: Função `listar_clientes_vencendo` agora filtra por `chat_id_usuario`, impedindo vazamento de dados entre usuários
+- **ASSINATURA DE FUNÇÕES ATUALIZADA**: Todas as funções críticas agora incluem parâmetro `chat_id_usuario` obrigatório para isolamento
+- **CACHE SEGURO**: Sistema de cache invalidado corretamente após operações críticas para evitar dados obsoletos
+- **VERSÃO MONOLÍTICA CRIADA**: Desenvolvida versão completa em arquivo único (bot_monolitico.py) com ~1000 linhas consolidando todos os módulos para facilitar deploy e portabilidade
+- **ARQUIVO ÚNICO FUNCIONAL**: Todo o sistema (Bot Telegram, PostgreSQL, Mercado Pago, WhatsApp, Templates, Automação) em um só arquivo Python
+- **MENU CONFIGURAÇÕES TECLADO PERSISTENTE**: Convertido menu de configurações de inline buttons para teclado persistente conforme solicitado pelo usuário
+- **DOCUMENTAÇÃO COMPLETA MONOLÍTICA**: Criados README, requirements e guias específicos para versão consolidada
+- **BACKUP PROJETO COMPLETO**: Gerados arquivos ZIP (115MB completo, 2.9MB essencial) e documentação detalhada da estrutura
+
+## Previous Changes (2025-08-16)
 - **COMPREHENSIVE USER GUIDE IMPLEMENTED**: Complete interactive guide with 9 organized sections (setup, WhatsApp connection, client management, templates, messaging, automation, reports, troubleshooting, tips) accessible via settings menu
 - **ADVANCED TEMPLATE CREATION SYSTEM**: Enhanced template creation with specific types (Welcome, 2 days before expiry, 1 day before expiry, expiry day, 1 day after expired) and ready-to-copy template models for each scenario
 - **TEMPLATE MODEL LIBRARY**: Implemented comprehensive template models with proper formatting, variables, and professional messaging for all business scenarios including billing, renewals, and customer communications

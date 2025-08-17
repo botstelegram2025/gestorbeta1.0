@@ -1040,7 +1040,8 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
             # Buscar estatísticas
             # Admin vê todos os clientes (sem filtro de usuário)
             total_clientes = len(self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None)) if self.db else 0
-            clientes_vencendo = len(self.db.listar_clientes_vencendo(dias=7)) if self.db else 0
+            # Admin vê todos os clientes (sem filtro de usuário)
+            clientes_vencendo = len(self.db.listar_clientes_vencendo(dias=7, chat_id_usuario=None)) if self.db else 0
             
             # Estatísticas de usuários
             total_usuarios = 0
@@ -3162,17 +3163,18 @@ Deseja realmente excluir este cliente?"""
             logger.error(f"Erro ao confirmar exclusão: {e}")
     
     def excluir_cliente(self, chat_id, cliente_id, message_id):
-        """Exclui cliente definitivamente"""
+        """Exclui cliente definitivamente - ISOLADO POR USUÁRIO"""
         try:
-            cliente = self.db.buscar_cliente_por_id(cliente_id)
+            # CRÍTICO: Buscar cliente com filtro de usuário
+            cliente = self.db.buscar_cliente_por_id(cliente_id, chat_id_usuario=chat_id)
             if not cliente:
-                self.send_message(chat_id, "❌ Cliente não encontrado.")
+                self.send_message(chat_id, "❌ Cliente não encontrado ou você não tem permissão para excluí-lo.")
                 return
             
             nome_cliente = cliente['nome']
             
-            # Remover cliente do banco
-            self.db.excluir_cliente(cliente_id)
+            # CRÍTICO: Remover cliente do banco com filtro de usuário
+            self.db.excluir_cliente(cliente_id, chat_id_usuario=chat_id)
             
             self.edit_message(chat_id, message_id,
                 f"✅ *Cliente excluído com sucesso!*\n\n"
@@ -3187,7 +3189,7 @@ Deseja realmente excluir este cliente?"""
             
         except Exception as e:
             logger.error(f"Erro ao excluir cliente: {e}")
-            self.send_message(chat_id, "❌ Erro ao excluir cliente.")
+            self.send_message(chat_id, "❌ Erro ao excluir cliente. Verifique se você tem permissão para esta operação.")
     
     def configurar_notificacoes_cliente(self, chat_id, cliente_id, message_id=None):
         """Interface para configurar preferências de notificação do cliente"""
@@ -3738,9 +3740,10 @@ Exemplo: `15/12/2025`"""
             self.cancelar_operacao(chat_id)
     
     def listar_vencimentos(self, chat_id):
-        """Lista clientes com vencimento próximo usando botões inline"""
+        """Lista clientes com vencimento próximo usando botões inline - ISOLADO POR USUÁRIO"""
         try:
-            clientes_vencendo = self.db.listar_clientes_vencendo(dias=7)
+            # CRÍTICO: Filtrar por usuário para isolamento completo
+            clientes_vencendo = self.db.listar_clientes_vencendo(dias=7, chat_id_usuario=chat_id)
             
             if not clientes_vencendo:
                 self.send_message(chat_id, 

@@ -1018,25 +1018,60 @@ _Obrigado por escolher nossos serviços!_ ✨""",
             logger.error(f"Erro ao atualizar vencimento: {e}")
             raise
     
-    def excluir_cliente(self, cliente_id):
-        """Exclui cliente definitivamente"""
+    def excluir_cliente(self, cliente_id, chat_id_usuario=None):
+        """Exclui cliente definitivamente - ISOLADO POR USUÁRIO"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    # Primeiro, excluir logs relacionados
-                    cursor.execute("DELETE FROM logs_envio WHERE cliente_id = %s", (cliente_id,))
+                    # CRÍTICO: Primeiro verificar se o cliente pertence ao usuário
+                    if chat_id_usuario is not None:
+                        cursor.execute("""
+                            SELECT id FROM clientes 
+                            WHERE id = %s AND chat_id_usuario = %s
+                        """, (cliente_id, chat_id_usuario))
+                        
+                        if not cursor.fetchone():
+                            raise ValueError("Cliente não encontrado ou não pertence ao usuário")
                     
-                    # Depois, excluir mensagens na fila
-                    cursor.execute("DELETE FROM fila_mensagens WHERE cliente_id = %s", (cliente_id,))
-                    
-                    # Finalmente, excluir o cliente
-                    cursor.execute("DELETE FROM clientes WHERE id = %s", (cliente_id,))
+                    # Primeiro, excluir logs relacionados (filtrado por usuário)
+                    if chat_id_usuario is not None:
+                        cursor.execute("""
+                            DELETE FROM logs_envio 
+                            WHERE cliente_id = %s 
+                            AND cliente_id IN (
+                                SELECT id FROM clientes WHERE chat_id_usuario = %s
+                            )
+                        """, (cliente_id, chat_id_usuario))
+                        
+                        # Depois, excluir mensagens na fila (filtrado por usuário)
+                        cursor.execute("""
+                            DELETE FROM fila_mensagens 
+                            WHERE cliente_id = %s 
+                            AND cliente_id IN (
+                                SELECT id FROM clientes WHERE chat_id_usuario = %s
+                            )
+                        """, (cliente_id, chat_id_usuario))
+                        
+                        # Finalmente, excluir o cliente (filtrado por usuário)
+                        cursor.execute("""
+                            DELETE FROM clientes 
+                            WHERE id = %s AND chat_id_usuario = %s
+                        """, (cliente_id, chat_id_usuario))
+                    else:
+                        # Fallback para admin (sem filtro de usuário)
+                        cursor.execute("DELETE FROM logs_envio WHERE cliente_id = %s", (cliente_id,))
+                        cursor.execute("DELETE FROM fila_mensagens WHERE cliente_id = %s", (cliente_id,))
+                        cursor.execute("DELETE FROM clientes WHERE id = %s", (cliente_id,))
                     
                     if cursor.rowcount == 0:
-                        raise ValueError("Cliente não encontrado")
+                        raise ValueError("Cliente não encontrado ou não foi possível excluir")
                     
                     conn.commit()
-                    logger.info(f"Cliente ID {cliente_id} excluído definitivamente")
+                    
+                    # Invalidar cache relacionado ao usuário
+                    self.invalidate_cache(f"clientes_{chat_id_usuario}")
+                    
+                    logger.info(f"Cliente ID {cliente_id} excluído definitivamente pelo usuário {chat_id_usuario}")
                     
         except Exception as e:
             logger.error(f"Erro ao excluir cliente: {e}")
@@ -1078,20 +1113,39 @@ _Obrigado por escolher nossos serviços!_ ✨""",
             logger.error(f"Erro ao buscar clientes: {e}")
             raise
     
-    def listar_clientes_vencendo(self, dias=3):
-        """Lista clientes com vencimento próximo"""
+    def listar_clientes_vencendo(self, dias=3, chat_id_usuario=None):
+        """Lista clientes com vencimento próximo - ISOLADO POR USUÁRIO"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute("""
+                    where_conditions = [
+                        "vencimento <= CURRENT_DATE + (%s * INTERVAL '1 day')",
+                        "ativo = TRUE"
+                    ]
+                    params = [dias]
+                    
+                    # CRÍTICO: Filtrar por usuário para isolamento de dados
+                    if chat_id_usuario is not None:
+                        where_conditions.append("chat_id_usuario = %s")
+                        params.append(chat_id_usuario)
+                    
+                    where_clause = " AND ".join(where_conditions)
+                    
+                    cursor.execute(f"""
                         SELECT 
                             id, nome, telefone, pacote, valor, servidor, vencimento,
-                            (vencimento - CURRENT_DATE) as dias_vencimento
+                            chat_id_usuario,
+                            (vencimento - CURRENT_DATE) as dias_vencimento,
+                            CASE 
+                                WHEN vencimento < CURRENT_DATE THEN 'vencido'
+                                WHEN vencimento = CURRENT_DATE THEN 'vence_hoje'
+                                WHEN vencimento <= CURRENT_DATE + INTERVAL '3 days' THEN 'vence_em_breve'
+                                ELSE 'em_dia'
+                            END as status_vencimento
                         FROM clientes 
-                        WHERE vencimento <= CURRENT_DATE + (%s * INTERVAL '1 day')
-                        AND ativo = TRUE
-                        ORDER BY vencimento ASC
-                    """, (dias,))
+                        WHERE {where_clause}
+                        ORDER BY vencimento ASC, nome ASC
+                    """, params)
                     
                     clientes = cursor.fetchall()
                     return [dict(cliente) for cliente in clientes]

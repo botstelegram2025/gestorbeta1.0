@@ -69,7 +69,8 @@ async def start(update, context):
     
     try:
         total_clientes = len(db.listar_clientes(apenas_ativos=True))
-        clientes_vencendo = len(db.listar_clientes_vencendo(dias=7))
+        # Admin vê todos os clientes (sem filtro de usuário)
+        clientes_vencendo = len(db.listar_clientes_vencendo(dias=7, chat_id_usuario=None))
     except Exception as e:
         logger.error(f"Erro ao buscar estatísticas: {e}")
         total_clientes = 0
