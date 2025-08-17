@@ -1,86 +1,57 @@
-# 🤖 GESTOR ALFA - Sistema de Gestão de Clientes
+# ATUALIZAÇÃO RENOVAÇÃO DE CLIENTES - 17/08/2025
 
-## 📋 Visão Geral
-Sistema completo de gestão de clientes com bot Telegram, integração WhatsApp via Baileys, e PostgreSQL multi-tenant. Inclui sistema de pagamentos via Mercado Pago PIX e automação de cobrança.
+## 📦 Conteúdo do Pacote
 
-## 🚀 Status do Sistema
-- ✅ **Bot Telegram funcionando** - @meubomgestor_bot
-- ✅ **PostgreSQL operacional** - 10 tabelas criadas
-- ✅ **Baileys WhatsApp API** - QR Code generation ativo
-- ✅ **Sistema multi-usuário** - Teste gratuito + assinatura R$20/mês
-- ✅ **Deploy Railway/Replit** - Híbrido configurado
+- **bot_complete.py** - Arquivo principal com correções aplicadas
+- **bot_complete_seguro.py** - Versão com correções de segurança multi-tenant
+- **CORREÇÕES_RENOVAÇÃO_17082025.md** - Documentação completa das alterações
+- **replit.md** - Documentação do projeto atualizada
+- **README.md** - Este arquivo
 
-## 🛠️ Arquivos Principais
+## 🎯 Principais Correções
 
-### Core System
-- `bot_complete.py` - Bot Telegram principal
-- `database.py` - Gerenciamento PostgreSQL
-- `models.py` - Modelos de dados
-- `config.py` - Configurações do sistema
+### ✅ Data de Renovação Corrigida
+- **Antes:** Renovação adicionava exatamente 30 dias (Ex: 15/08 → 14/09)
+- **Agora:** Mantém o mesmo dia do próximo mês (Ex: 15/08 → 15/09)
 
-### Integrations
-- `mercadopago_integration.py` - Pagamentos PIX
-- `baileys_api.py` - WhatsApp integration
-- `baileys-server/` - Node.js WhatsApp server
+### ✅ Pergunta sobre Mensagem de Renovação
+- Sistema agora pergunta automaticamente se deseja enviar mensagem após renovar
+- Opções "Sim" e "Não" com interface intuitiva
 
-### Deployment
-- `Dockerfile` - Container Replit
-- `Dockerfile.railway` - Container Railway
-- `Procfile` - Railway deployment
-- `pyproject.toml` - Dependencies
+### ✅ Cadastro de Novos Clientes
+- Cálculo de vencimento corrigido para usar meses reais
+- Planos PLANO30, PLANO60, etc. agora calculam corretamente
 
-### Documentation
-- `HYBRID_DEPLOYMENT_ANALYSIS.md` - Análise deploy híbrido
-- `CONFIGURAR_RAILWAY_REPLIT_HIBRIDO.md` - Setup híbrido
-- `RAILWAY_DATABASE_FIX.md` - Fix de tabelas Railway
-- `replit.md` - Documentação completa
+## 🚀 Novas Funções Implementadas
 
-## 💰 Custos de Deploy
+1. **calcular_proximo_mes()** - Calcula próximo mês mantendo mesmo dia
+2. **calcular_vencimento_meses()** - Calcula vencimento para N meses
+3. **processar_renovacao_proximo_mes()** - Nova função principal de renovação
 
-### Opção 1: Railway + Replit
-- Railway: $0-5/mês (bot)
-- Replit Core: $25/mês (banco)
-- **Total: $25-30/mês**
+## 📋 Como Aplicar
 
-### Opção 2: Railway + Neon
-- Railway: $5/mês (bot)
-- Neon: $0/mês (banco até 3GB)
-- **Total: $5/mês**
+1. Substitua o arquivo `bot_complete.py` existente
+2. Reinicie o bot com `python3 bot_complete.py`
+3. Teste a renovação de um cliente
 
-## 🔧 Configuração Rápida
+## ✅ Testes Realizados
 
-### 1. Deploy no Railway
-```bash
-# Clone os arquivos
-# Configure variables:
-DATABASE_URL=sua_url_postgresql
-BOT_TOKEN=seu_bot_token
-ADMIN_CHAT_ID=seu_chat_id
-MERCADOPAGO_ACCESS_TOKEN=seu_token_mp
-```
+- ✅ Data de renovação calculada corretamente
+- ✅ Pergunta sobre mensagem funcionando
+- ✅ Interface atualizada
+- ✅ Bot reiniciado com sucesso
+- ✅ Cadastro de cliente testado (Sebastião - vence 17/09/2025)
 
-### 2. Deploy no Replit
-```bash
-# Upload dos arquivos
-# Configure secrets no painel
-# Run: python bot_complete.py
-```
+## 🔧 Compatibilidade
 
-## 📊 Funcionalidades
+- Mantém total compatibilidade com versões anteriores
+- Método antigo `processar_renovacao_30dias()` preservado como legacy
+- Banco de dados inalterado
+- Templates existentes funcionam normalmente
 
-- ✅ Gestão completa de clientes
-- ✅ Templates de mensagem personalizáveis
-- ✅ Agendamento automático de cobrança
-- ✅ Sistema multi-usuário com isolamento
-- ✅ Relatórios financeiros
-- ✅ Integração WhatsApp persistente
-- ✅ Pagamentos PIX automáticos
-- ✅ Interface administrativa via Telegram
+## 📊 Status
 
-## 🎯 Versão: ALFA FINAL
-Sistema testado e funcional em produção.
-Deploy híbrido recomendado para melhor custo-benefício.
-
----
-**Criado em:** Agosto 2025  
-**Status:** Pronto para produção
+**🟢 PRONTO PARA PRODUÇÃO**
+- Todas as correções testadas
+- Bot funcionando normalmente
+- Sem quebras de funcionalidade

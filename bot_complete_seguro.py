@@ -1852,10 +1852,6 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
                 cliente_id = int(callback_data.split('_')[2])
                 self.processar_renovacao_30dias(chat_id, cliente_id)
             
-            elif callback_data.startswith('renovar_proximo_mes_'):
-                cliente_id = int(callback_data.split('_')[3])
-                self.processar_renovacao_proximo_mes(chat_id, cliente_id)
-            
             elif callback_data.startswith('renovar_nova_data_'):
                 cliente_id = int(callback_data.split('_')[3])
                 self.iniciar_renovacao_nova_data(chat_id, cliente_id)
@@ -2813,8 +2809,8 @@ Info: {info_adicional}
 
 🤔 *Como deseja renovar?*
 
-📅 *Opção 1:* Renovar mantendo o mesmo dia do próximo mês
-   Novo vencimento: {novo_vencimento_mes.strftime('%d/%m/%Y')}
+📅 *Opção 1:* Renovar com mesma data (+30 dias)
+   Novo vencimento: {novo_vencimento_30.strftime('%d/%m/%Y')}
 
 📅 *Opção 2:* Definir nova data de vencimento
    Escolha uma data personalizada
@@ -2823,7 +2819,7 @@ Escolha uma das opções abaixo:"""
             
             inline_keyboard = [
                 [
-                    {'text': '📅 Mesmo Dia do Próximo Mês', 'callback_data': f'renovar_proximo_mes_{cliente_id}'},
+                    {'text': '📅 Mesma Data (+30 dias)', 'callback_data': f'renovar_30dias_{cliente_id}'},
                     {'text': '📅 Nova Data', 'callback_data': f'renovar_nova_data_{cliente_id}'}
                 ],
                 [
@@ -2839,88 +2835,8 @@ Escolha uma das opções abaixo:"""
             logger.error(f"Erro ao mostrar opções de renovação: {e}")
             self.send_message(chat_id, "❌ Erro ao carregar opções de renovação.")
     
-    def processar_renovacao_proximo_mes(self, chat_id, cliente_id):
-        """Renova cliente para o mesmo dia do próximo mês"""
-        try:
-            cliente = self.db.buscar_cliente_por_id(cliente_id)
-            if not cliente:
-                self.send_message(chat_id, "❌ Cliente não encontrado.")
-                return
-            
-            # Calcular nova data de vencimento mantendo o mesmo dia do próximo mês
-            vencimento_atual = cliente['vencimento']
-            novo_vencimento = self.calcular_proximo_mes(vencimento_atual)
-            
-            # Atualizar no banco
-            self.db.atualizar_vencimento_cliente(cliente_id, novo_vencimento)
-            
-            # CANCELAR AUTOMATICAMENTE MENSAGENS PENDENTES NA FILA
-            mensagens_canceladas = 0
-            if self.scheduler:
-                mensagens_canceladas = self.scheduler.cancelar_mensagens_cliente_renovado(cliente_id)
-                logger.info(f"Cliente {cliente['nome']} renovado: {mensagens_canceladas} mensagens canceladas da fila")
-            else:
-                logger.warning("Scheduler não disponível para cancelar mensagens")
-            
-            # Verificar se existe template de renovação
-            template_renovacao = None
-            if self.template_manager:
-                templates = self.template_manager.listar_templates()
-                for template in templates:
-                    if template.get('tipo') == 'renovacao':
-                        template_renovacao = template
-                        break
-            
-            # Perguntar se deseja enviar mensagem de renovação
-            mensagem = f"""✅ *CLIENTE RENOVADO COM SUCESSO!*
-
-👤 *{cliente['nome']}*
-📅 Vencimento anterior: *{vencimento_atual.strftime('%d/%m/%Y')}*
-📅 Novo vencimento: *{novo_vencimento.strftime('%d/%m/%Y')}*
-
-🎉 Cliente renovado mantendo o mesmo dia do próximo mês!"""
-            
-            # Adicionar informação sobre cancelamento de mensagens se houve
-            if mensagens_canceladas > 0:
-                mensagem += f"\n🔄 {mensagens_canceladas} mensagem(s) pendente(s) cancelada(s) automaticamente"
-            
-            # Sempre perguntar se deseja enviar mensagem de renovação
-            mensagem += "\n\n📱 *Deseja enviar mensagem de renovação para o cliente?*"
-            
-            # Criar botões de ação
-            inline_keyboard = []
-            
-            if template_renovacao:
-                inline_keyboard.append([
-                    {'text': '✅ Sim, Enviar Mensagem de Renovação', 'callback_data': f'enviar_renovacao_{cliente_id}_{template_renovacao["id"]}'},
-                    {'text': '❌ Não Enviar', 'callback_data': f'cliente_detalhes_{cliente_id}'}
-                ])
-            else:
-                inline_keyboard.append([
-                    {'text': '💬 Enviar Mensagem Manual', 'callback_data': f'enviar_mensagem_{cliente_id}'},
-                    {'text': '❌ Não Enviar', 'callback_data': f'cliente_detalhes_{cliente_id}'}
-                ])
-            
-            inline_keyboard.extend([
-                [
-                    {'text': '📋 Ver Cliente', 'callback_data': f'cliente_detalhes_{cliente_id}'},
-                    {'text': '🔙 Lista Clientes', 'callback_data': 'menu_clientes'}
-                ],
-                [
-                    {'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}
-                ]
-            ])
-            
-            self.send_message(chat_id, mensagem,
-                parse_mode='Markdown',
-                reply_markup={'inline_keyboard': inline_keyboard})
-            
-        except Exception as e:
-            logger.error(f"Erro ao processar renovação: {e}")
-            self.send_message(chat_id, "❌ Erro ao processar renovação.")
-    
     def processar_renovacao_30dias(self, chat_id, cliente_id):
-        """Renova cliente por mais 30 dias a partir do vencimento atual (MÉTODO LEGACY)"""
+        """Renova cliente por mais 30 dias a partir do vencimento atual"""
         try:
             cliente = self.db.buscar_cliente_por_id(cliente_id)
             if not cliente:
@@ -2964,29 +2880,21 @@ Escolha uma das opções abaixo:"""
             if mensagens_canceladas > 0:
                 mensagem += f"\n🔄 {mensagens_canceladas} mensagem(s) pendente(s) cancelada(s) automaticamente"
             
-            # Perguntar se deseja enviar mensagem de renovação
-            mensagem += "\n\n📱 *Deseja enviar mensagem de renovação para o cliente?*"
-            
             # Criar botões de ação
             inline_keyboard = []
             
             if template_renovacao:
                 inline_keyboard.append([
-                    {'text': '✅ Sim, Enviar Mensagem de Renovação', 'callback_data': f'enviar_renovacao_{cliente_id}_{template_renovacao["id"]}'},
-                    {'text': '❌ Não Enviar', 'callback_data': f'cliente_detalhes_{cliente_id}'}
-                ])
-            else:
-                inline_keyboard.append([
-                    {'text': '💬 Enviar Mensagem Manual', 'callback_data': f'enviar_mensagem_{cliente_id}'},
-                    {'text': '❌ Não Enviar', 'callback_data': f'cliente_detalhes_{cliente_id}'}
+                    {'text': '📱 Enviar Mensagem de Renovação', 'callback_data': f'enviar_renovacao_{cliente_id}_{template_renovacao["id"]}'}
                 ])
             
             inline_keyboard.extend([
                 [
-                    {'text': '📋 Ver Cliente', 'callback_data': f'cliente_detalhes_{cliente_id}'},
-                    {'text': '🔙 Lista Clientes', 'callback_data': 'menu_clientes'}
+                    {'text': '💬 Enviar Outra Mensagem', 'callback_data': f'enviar_mensagem_{cliente_id}'},
+                    {'text': '📋 Ver Cliente', 'callback_data': f'cliente_detalhes_{cliente_id}'}
                 ],
                 [
+                    {'text': '🔙 Lista Clientes', 'callback_data': 'menu_clientes'},
                     {'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}
                 ]
             ])
