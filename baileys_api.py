@@ -1,6 +1,6 @@
 """
-Integração corrigida para múltiplas sessões com Baileys API
-Suporta sessão por usuário (ex.: user_{chat_id_usuario}) em TODOS os endpoints.
+Integração Baileys API (alta performance, múltiplas sessões)
+Padrão de endpoints: /sessions/{session}/<acao>
 """
 
 import os
@@ -9,25 +9,27 @@ import logging
 from datetime import datetime
 import json
 import time
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
+# Fallback simples se você não importar de utils
 def formatar_datetime_br(dt: datetime) -> str:
-    # fallback simples caso o util não esteja disponível
     return dt.strftime("%d/%m/%Y %H:%M")
+
 
 class BaileysAPI:
     def __init__(self):
-        """Inicializa a integração com Baileys API"""
+        """Inicializa a integração com Baileys API (performática e sessionizada)"""
         self.base_url = os.getenv('BAILEYS_API_URL', 'http://localhost:3000')
         self.api_key = os.getenv('BAILEYS_API_KEY', '')
-        self.default_session = os.getenv('BAILEYS_SESSION', 'bot_clientes')  # fallback caso não seja informado chat_id
+        # sessão padrão só como fallback quando não houver chat_id/session explícita
+        self.default_session = os.getenv('BAILEYS_SESSION', 'bot_clientes')
         self.timeout = int(os.getenv('BAILEYS_TIMEOUT', '30'))
         self.max_retries = int(os.getenv('BAILEYS_MAX_RETRIES', '3'))
         self.retry_delay = int(os.getenv('BAILEYS_RETRY_DELAY', '5'))
 
-        # Config de envio
+        # Envio
         self.message_delay = int(os.getenv('BAILEYS_MESSAGE_DELAY', '2'))
         self.auto_reconnect = os.getenv('BAILEYS_AUTO_RECONNECT', 'true').lower() == 'true'
 
@@ -44,17 +46,35 @@ class BaileysAPI:
 
         logger.info(f"Baileys API inicializada: {self.base_url}")
 
+        # >>> Se seu servidor usa outro layout, ajuste AQUI para máximo desempenho (apenas troca de strings).
+        self._paths = {
+            "status":          "sessions/{session}/status",
+            "qr":              "sessions/{session}/qr",
+            "send_message":    "sessions/{session}/send-message",
+            "send_image":      "sessions/{session}/send-image",
+            "send_document":   "sessions/{session}/send-document",
+            "check_number":    "sessions/{session}/check-number",
+            "messages":        "sessions/{session}/messages/{number}",
+            "chat_info":       "sessions/{session}/chat-info/{number}",
+            "restart":         "sessions/{session}/restart",
+            "logout":          "sessions/{session}/logout",
+            # globais opcionais
+            "health":          "health",
+            "sessions":        "sessions",
+            "status_global":   "status",
+        }
+
     # ---------------------------
     # Sessão / Helpers
     # ---------------------------
     def get_user_session(self, chat_id_usuario: Optional[int]) -> str:
-        """Gera nome de sessão específico para o usuário"""
+        """Nome de sessão por usuário (performático e determinístico)."""
         if chat_id_usuario is None:
             return self.default_session
         return f"user_{chat_id_usuario}"
 
     def _resolve_session(self, chat_id_usuario: Optional[int] = None, explicit_session: Optional[str] = None) -> str:
-        """Resolve a sessão a ser usada na chamada"""
+        """Resolve a sessão usada na chamada, sem tentativa extra."""
         if explicit_session:
             return explicit_session
         return self.get_user_session(chat_id_usuario)
@@ -62,8 +82,15 @@ class BaileysAPI:
     # ---------------------------
     # HTTP Client com retry
     # ---------------------------
-    def _make_request(self, endpoint: str, method: str = 'GET', data: Dict = None, retries: Optional[int] = None, params: Dict = None) -> Dict:
-        """Faz requisição HTTP para a API Baileys"""
+    def _make_request(
+        self,
+        endpoint: str,
+        method: str = 'GET',
+        data: Optional[Dict] = None,
+        retries: Optional[int] = None,
+        params: Optional[Dict] = None
+    ) -> Dict:
+        """Requisição HTTP performática; sem fallback de rotas."""
         if retries is None:
             retries = self.max_retries
 
@@ -71,13 +98,13 @@ class BaileysAPI:
 
         for attempt in range(retries + 1):
             try:
-                if method.upper() == 'GET':
+                if method == 'GET':
                     response = requests.get(url, headers=self.headers, timeout=self.timeout, params=params or data)
-                elif method.upper() == 'POST':
+                elif method == 'POST':
                     response = requests.post(url, headers=self.headers, timeout=self.timeout, json=data, params=params)
-                elif method.upper() == 'PUT':
+                elif method == 'PUT':
                     response = requests.put(url, headers=self.headers, timeout=self.timeout, json=data, params=params)
-                elif method.upper() == 'DELETE':
+                elif method == 'DELETE':
                     response = requests.delete(url, headers=self.headers, timeout=self.timeout, params=params)
                 else:
                     raise ValueError(f"Método HTTP não suportado: {method}")
@@ -85,7 +112,6 @@ class BaileysAPI:
                 logger.debug(f"Baileys API Request: {method} {url} - Status: {response.status_code}")
 
                 if 200 <= response.status_code < 300:
-                    # permitir 204/201 etc.
                     try:
                         return response.json()
                     except json.JSONDecodeError:
@@ -93,16 +119,16 @@ class BaileysAPI:
                 elif response.status_code == 401:
                     return {'success': False, 'error': 'Não autorizado - verifique API Key'}
                 elif response.status_code == 404:
+                    # **performático**: sem tentativas de outras rotas. Falha rápida e clara.
                     return {'success': False, 'error': 'Endpoint não encontrado'}
                 elif response.status_code == 429:
                     return {'success': False, 'error': 'Muitas requisições - tente mais tarde'}
                 else:
-                    error_msg = f"Erro HTTP {response.status_code}"
                     try:
                         error_data = response.json()
-                        error_msg = error_data.get('error', error_msg)
+                        error_msg = error_data.get('error', f"Erro HTTP {response.status_code}")
                     except Exception:
-                        error_msg = response.text or error_msg
+                        error_msg = response.text or f"Erro HTTP {response.status_code}"
 
                     if attempt < retries:
                         logger.warning(f"Tentativa {attempt + 1} falhou: {error_msg}. Retentando em {self.retry_delay}s...")
@@ -140,7 +166,7 @@ class BaileysAPI:
     # Status / Sessão
     # ---------------------------
     def get_status(self, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
-        """Obtém status da conexão WhatsApp para uma sessão específica"""
+        """Obtém status da sessão específica (cache por sessão)."""
         try:
             session_name = self._resolve_session(chat_id_usuario, session)
             now = time.time()
@@ -148,10 +174,11 @@ class BaileysAPI:
             if cache_key in self._status_cache and now - self._status_cache.get(f'{cache_key}_timestamp', 0) < self._cache_timeout:
                 return self._status_cache[cache_key]
 
-            response = self._make_request(f'status/{session_name}', 'GET')
+            endpoint = self._paths["status"].format(session=session_name)
+            response = self._make_request(endpoint, 'GET')
+
             if response.get('success'):
                 status_data = response.get('data', {})
-
                 status = {
                     'status': self._format_connection_status(status_data.get('state', 'disconnected')),
                     'numero': (status_data.get('user', {}) or {}).get('id', '').replace('@s.whatsapp.net', ''),
@@ -163,23 +190,22 @@ class BaileysAPI:
                     'fila_pendente': (status_data.get('stats', {}) or {}).get('pending', 0),
                     'session': session_name
                 }
-
                 self._status_cache[cache_key] = status
                 self._status_cache[f'{cache_key}_timestamp'] = now
                 return status
-            else:
-                return {
-                    'status': '🔴 Erro na conexão',
-                    'numero': 'N/A',
-                    'bateria': None,
-                    'ultima_conexao': 'N/A',
-                    'qr_needed': True,
-                    'mensagens_enviadas': 0,
-                    'mensagens_falharam': 0,
-                    'fila_pendente': 0,
-                    'error': response.get('error', 'Erro desconhecido'),
-                    'session': session_name
-                }
+
+            return {
+                'status': '🔴 Erro na conexão',
+                'numero': 'N/A',
+                'bateria': None,
+                'ultima_conexao': 'N/A',
+                'qr_needed': True,
+                'mensagens_enviadas': 0,
+                'mensagens_falharam': 0,
+                'fila_pendente': 0,
+                'error': response.get('error', 'Erro desconhecido'),
+                'session': session_name
+            }
 
         except Exception as e:
             logger.error(f"Erro ao obter status: {e}")
@@ -221,12 +247,14 @@ class BaileysAPI:
         return status.get('qr_needed', True)
 
     def generate_qr_code(self, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
-        """Gera QR Code para sessão específica"""
+        """Gera QR Code para a sessão específica (rota única e direta)."""
         try:
             session_name = self._resolve_session(chat_id_usuario, session)
-            response = self._make_request(f'qr/{session_name}', 'GET')
+            endpoint = self._paths["qr"].format(session=session_name)
+            response = self._make_request(endpoint, 'GET')
+
             if response.get('success'):
-                data = response.get('data', response)  # alguns servers retornam dentro de data
+                data = response.get('data', response)
                 return {
                     'success': True,
                     'qr_code': data.get('qr'),
@@ -242,19 +270,28 @@ class BaileysAPI:
     # ---------------------------
     # Envio de mensagens
     # ---------------------------
-    def send_message(self, phone: str, message: str, chat_id_usuario: Optional[int] = None, session: Optional[str] = None, options: Dict = None) -> Dict:
-        """Envia mensagem via WhatsApp na sessão específica"""
+    def send_message(
+        self,
+        phone: str,
+        message: str,
+        chat_id_usuario: Optional[int] = None,
+        session: Optional[str] = None,
+        options: Optional[Dict] = None
+    ) -> Dict:
+        """Envia mensagem na sessão específica (performático)."""
         try:
             clean_phone = self._clean_phone_number(phone)
             if not clean_phone:
                 return {'success': False, 'error': 'Número de telefone inválido'}
 
             session_name = self._resolve_session(chat_id_usuario, session)
+            endpoint = self._paths["send_message"].format(session=session_name)
+
             payload = {'number': clean_phone, 'message': message}
             if options:
                 payload.update(options)
 
-            response = self._make_request(f'send-message/{session_name}', 'POST', payload)
+            response = self._make_request(endpoint, 'POST', payload)
             if response.get('success'):
                 if self.message_delay > 0:
                     time.sleep(self.message_delay)
@@ -271,19 +308,28 @@ class BaileysAPI:
             logger.error(f"Erro ao enviar mensagem: {e}")
             return {'success': False, 'error': str(e)}
 
-    def send_image(self, phone: str, image_path: str, chat_id_usuario: Optional[int] = None, session: Optional[str] = None, caption: Optional[str] = None) -> Dict:
-        """Envia imagem via WhatsApp na sessão específica"""
+    def send_image(
+        self,
+        phone: str,
+        image_path: str,
+        chat_id_usuario: Optional[int] = None,
+        session: Optional[str] = None,
+        caption: Optional[str] = None
+    ) -> Dict:
+        """Envia imagem na sessão específica."""
         try:
             clean_phone = self._clean_phone_number(phone)
             if not clean_phone:
                 return {'success': False, 'error': 'Número de telefone inválido'}
 
             session_name = self._resolve_session(chat_id_usuario, session)
+            endpoint = self._paths["send_image"].format(session=session_name)
+
             data = {'number': clean_phone, 'image': image_path}
             if caption:
                 data['caption'] = caption
 
-            response = self._make_request(f'send-image/{session_name}', 'POST', data)
+            response = self._make_request(endpoint, 'POST', data)
             if response.get('success') and self.message_delay > 0:
                 time.sleep(self.message_delay)
             return response
@@ -292,19 +338,28 @@ class BaileysAPI:
             logger.error(f"Erro ao enviar imagem: {e}")
             return {'success': False, 'error': str(e)}
 
-    def send_document(self, phone: str, document_path: str, filename: Optional[str] = None, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
-        """Envia documento via WhatsApp na sessão específica"""
+    def send_document(
+        self,
+        phone: str,
+        document_path: str,
+        filename: Optional[str] = None,
+        chat_id_usuario: Optional[int] = None,
+        session: Optional[str] = None
+    ) -> Dict:
+        """Envia documento na sessão específica."""
         try:
             clean_phone = self._clean_phone_number(phone)
             if not clean_phone:
                 return {'success': False, 'error': 'Número de telefone inválido'}
 
             session_name = self._resolve_session(chat_id_usuario, session)
+            endpoint = self._paths["send_document"].format(session=session_name)
+
             data = {'number': clean_phone, 'document': document_path}
             if filename:
                 data['filename'] = filename
 
-            response = self._make_request(f'send-document/{session_name}', 'POST', data)
+            response = self._make_request(endpoint, 'POST', data)
             if response.get('success') and self.message_delay > 0:
                 time.sleep(self.message_delay)
             return response
@@ -317,53 +372,72 @@ class BaileysAPI:
     # Informações / Utilidades
     # ---------------------------
     def get_chat_info(self, phone: str, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
+        """Info do chat na sessão específica."""
         try:
             clean_phone = self._clean_phone_number(phone)
             if not clean_phone:
                 return {'success': False, 'error': 'Número de telefone inválido'}
+
             session_name = self._resolve_session(chat_id_usuario, session)
-            return self._make_request(f'chat-info/{session_name}/{clean_phone}', 'GET')
+            endpoint = self._paths["chat_info"].format(session=session_name, number=clean_phone)
+
+            return self._make_request(endpoint, 'GET')
+
         except Exception as e:
             logger.error(f"Erro ao obter info do chat: {e}")
             return {'success': False, 'error': str(e)}
 
     def is_number_registered(self, phone: str, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
+        """Verifica registro do número na sessão específica."""
         try:
             clean_phone = self._clean_phone_number(phone)
             if not clean_phone:
                 return {'success': False, 'error': 'Número de telefone inválido'}
+
             session_name = self._resolve_session(chat_id_usuario, session)
+            endpoint = self._paths["check_number"].format(session=session_name)
+
             data = {'number': clean_phone}
-            return self._make_request(f'check-number/{session_name}', 'POST', data)
+            return self._make_request(endpoint, 'POST', data)
+
         except Exception as e:
             logger.error(f"Erro ao verificar número: {e}")
             return {'success': False, 'error': str(e)}
 
     def reconnect(self, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
+        """Reinicia a sessão especificada."""
         try:
             session_name = self._resolve_session(chat_id_usuario, session)
-            response = self._make_request(f'restart/{session_name}', 'POST')
-            # limpa cache da sessão
+            endpoint = self._paths["restart"].format(session=session_name)
+
+            response = self._make_request(endpoint, 'POST')
+            # Limpa cache da sessão
             self._status_cache.pop(f'status_{session_name}', None)
             self._status_cache.pop(f'status_{session_name}_timestamp', None)
             return response
+
         except Exception as e:
             logger.error(f"Erro ao reconectar: {e}")
             return {'success': False, 'error': str(e)}
 
     def logout(self, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
+        """Efetua logout da sessão especificada."""
         try:
             session_name = self._resolve_session(chat_id_usuario, session)
-            response = self._make_request(f'logout/{session_name}', 'POST')
-            # limpa cache da sessão
+            endpoint = self._paths["logout"].format(session=session_name)
+
+            response = self._make_request(endpoint, 'POST')
+            # Limpa cache da sessão
             self._status_cache.pop(f'status_{session_name}', None)
             self._status_cache.pop(f'status_{session_name}_timestamp', None)
             return response
+
         except Exception as e:
             logger.error(f"Erro ao fazer logout: {e}")
             return {'success': False, 'error': str(e)}
 
     def get_config(self) -> Dict:
+        """Config atual do cliente."""
         return {
             'base_url': self.base_url,
             'default_session': self.default_session,
@@ -375,6 +449,7 @@ class BaileysAPI:
         }
 
     def update_config(self, **kwargs) -> bool:
+        """Atualiza config leve (sem I/O extra)."""
         try:
             if 'timeout' in kwargs:
                 self.timeout = int(kwargs['timeout'])
@@ -391,21 +466,37 @@ class BaileysAPI:
             logger.error(f"Erro ao atualizar configurações: {e}")
             return False
 
-    def get_message_history(self, phone: str, limit: int = 50, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
+    def get_message_history(
+        self,
+        phone: str,
+        limit: int = 50,
+        chat_id_usuario: Optional[int] = None,
+        session: Optional[str] = None
+    ) -> Dict:
+        """Histórico de mensagens na sessão específica."""
         try:
             clean_phone = self._clean_phone_number(phone)
             if not clean_phone:
                 return {'success': False, 'error': 'Número de telefone inválido'}
+
             session_name = self._resolve_session(chat_id_usuario, session)
+            endpoint = self._paths["messages"].format(session=session_name, number=clean_phone)
+
             params = {'limit': limit}
-            return self._make_request(f'messages/{session_name}/{clean_phone}', 'GET', params=params)
+            return self._make_request(endpoint, 'GET', params=params)
+
         except Exception as e:
             logger.error(f"Erro ao obter histórico: {e}")
             return {'success': False, 'error': str(e)}
 
-    def send_bulk_messages(self, messages: List[Dict[str, Any]], default_chat_id_usuario: Optional[int] = None, default_session: Optional[str] = None) -> Dict:
+    def send_bulk_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        default_chat_id_usuario: Optional[int] = None,
+        default_session: Optional[str] = None
+    ) -> Dict:
         """
-        Envia múltiplas mensagens em lote.
+        Envia múltiplas mensagens em lote com seleção de sessão por item.
         Cada item pode conter:
           - phone (str) [obrigatório]
           - message (str) [obrigatório]
@@ -430,7 +521,14 @@ class BaileysAPI:
                     error_count += 1
                     continue
 
-                result = self.send_message(phone, message, chat_id_usuario=per_item_chat_id, session=per_item_session, options=options)
+                result = self.send_message(
+                    phone,
+                    message,
+                    chat_id_usuario=per_item_chat_id,
+                    session=per_item_session,
+                    options=options
+                )
+
                 results.append({
                     'index': i,
                     'phone': phone,
@@ -464,15 +562,17 @@ class BaileysAPI:
     # Saúde / Sessões
     # ---------------------------
     def health_check(self) -> Dict:
+        """Checagem do servidor (global, sem sessão)."""
         try:
-            return self._make_request('health', 'GET')
+            return self._make_request(self._paths["health"], 'GET')
         except Exception as e:
             logger.error(f"Erro no health check: {e}")
             return {'success': False, 'error': str(e)}
 
     def get_sessions(self) -> Dict:
+        """Lista as sessões disponíveis no servidor."""
         try:
-            return self._make_request('sessions', 'GET')
+            return self._make_request(self._paths["sessions"], 'GET')
         except Exception as e:
             logger.error(f"Erro ao obter sessões: {e}")
             return {'success': False, 'error': str(e)}
@@ -481,19 +581,20 @@ class BaileysAPI:
     # Telefones
     # ---------------------------
     def _clean_phone_number(self, phone: str) -> str:
-        """Limpa e formata número de telefone; prioriza BR (55) se não houver DDI."""
+        """
+        Limpa e formata número. Default: Brasil (55) se não vier DDI.
+        Ajuste conforme sua regra de negócio.
+        """
         if not phone:
             return ""
         clean = ''.join(filter(str.isdigit, phone))
 
-        # se já vier com DDI
+        # já tem DDI BR
         if clean.startswith('55'):
-            if len(clean) >= 12:  # 55 + DDD(2) + 9 dígitos
-                return clean
-            # se vier menor, ainda devolvemos para a API decidir; alternativa: validar melhor
+            # Mantém como está; muitas impls aceitam 12-13 dígitos conforme DDD e 9º dígito
             return clean
 
-        # sem DDI: adiciona BR por padrão
+        # sem DDI: adiciona BR por padrão se tiver ao menos 10 dígitos (DDD + número)
         if len(clean) >= 10:
             return f"55{clean}"
 
