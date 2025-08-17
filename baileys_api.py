@@ -121,6 +121,7 @@ class BaileysAPI:
 
     # --------------------- Status/QR/Controle --------------------
     def get_status(self, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
+        """Compatível com /status/:sessionId do seu servidor (sem 'success')."""
         try:
             session_name = self._resolve_session(chat_id_usuario, session)
             now = time.time()
@@ -130,22 +131,34 @@ class BaileysAPI:
 
             endpoint = self._paths["status"].format(session=session_name)
             resp = self._make_request(endpoint, 'GET')
-            if resp.get('success'):
-                data = resp.get('data', {})
+
+            # O servidor não envia 'success' aqui; trataremos como sucesso se vier chaves esperadas.
+            if isinstance(resp, dict) and ("connected" in resp or "status" in resp):
+                connected = bool(resp.get("connected", False))
+                raw_status = resp.get("status", "disconnected")
+
                 status = {
-                    'status': self._format_connection_status((data or {}).get('state', 'disconnected')),
-                    'numero': ((data or {}).get('user') or {}).get('id', '').replace('@s.whatsapp.net', ''),
-                    'bateria': ((data or {}).get('battery') or {}).get('percentage'),
-                    'ultima_conexao': self._format_last_seen((data or {}).get('lastSeen')),
-                    'qr_needed': bool((data or {}).get('qr')),
-                    'mensagens_enviadas': ((data or {}).get('stats') or {}).get('sent', 0),
-                    'mensagens_falharam': ((data or {}).get('stats') or {}).get('failed', 0),
-                    'fila_pendente': ((data or {}).get('stats') or {}).get('pending', 0),
-                    'session': session_name
+                    # Se connected=True, força “🟢 Conectado”; senão usa o mapeamento do raw_status
+                    'status': '🟢 Conectado' if connected else self._format_connection_status(raw_status),
+                    # server 'session' vem no formato JID ou None
+                    'numero': (resp.get('session') or '').replace('@s.whatsapp.net', ''),
+                    # server não retorna bateria/lastSeen -> mantemos None/'N/A'
+                    'bateria': None,
+                    'ultima_conexao': 'N/A',
+                    # Se já está conectado, não precisa de QR; caso contrário, usa qr_available
+                    'qr_needed': (not connected) and bool(resp.get('qr_available', False)),
+                    # não há stats neste endpoint; mantemos 0
+                    'mensagens_enviadas': 0,
+                    'mensagens_falharam': 0,
+                    'fila_pendente': 0,
+                    'session': resp.get('session_id', session_name)
                 }
+
                 self._status_cache[cache_key] = status
                 self._status_cache[f'{cache_key}_timestamp'] = now
                 return status
+
+            # Se chegou aqui, tratamos como erro
             return {
                 'status': '🔴 Erro na conexão',
                 'numero': 'N/A',
@@ -155,12 +168,36 @@ class BaileysAPI:
                 'mensagens_enviadas': 0,
                 'mensagens_falharam': 0,
                 'fila_pendente': 0,
-                'error': resp.get('error', 'Erro desconhecido'),
+                'error': resp.get('error', 'Resposta inesperada do servidor') if isinstance(resp, dict) else 'Resposta inesperada do servidor',
                 'session': session_name
             }
+
         except Exception as e:
             logger.error(f"Erro ao obter status: {e}")
-            return {'status': '❌ Erro interno', 'error': str(e)}
+            return {
+                'status': '❌ Erro interno',
+                'numero': 'N/A',
+                'bateria': None,
+                'ultima_conexao': 'N/A',
+                'qr_needed': True,
+                'mensagens_enviadas': 0,
+                'mensagens_falharam': 0,
+                'fila_pendente': 0,
+                'error': str(e)
+            }
+
+    def _format_connection_status(self, state: str) -> str:
+        """Inclui os rótulos específicos do seu server.js."""
+        status_map = {
+            'open': '🟢 Conectado',
+            'connected': '🟢 Conectado',
+            'connecting': '🟡 Conectando',
+            'qr_ready': '🟡 Aguardando leitura do QR',
+            'close': '🔴 Desconectado',
+            'disconnected': '🔴 Desconectado',
+            'error': '🔴 Erro'
+        }
+        return status_map.get(str(state).lower(), f'❓ {state}')
 
     def generate_qr_code(self, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
         """GET /qr/:sessionId (servidor também aceita /qr?sessionId=)"""
@@ -168,7 +205,7 @@ class BaileysAPI:
             session_name = self._resolve_session(chat_id_usuario, session)
             endpoint = self._paths["qr"].format(session=session_name)
             resp = self._make_request(endpoint, 'GET')
-            if resp.get('success'):
+            if resp.get('success') or ('qr' in resp or 'qr_image' in resp):
                 data = resp.get('data', resp)
                 return {
                     'success': True,
@@ -271,14 +308,6 @@ class BaileysAPI:
         return ""
 
     # --------------------- Formatação ----------------------------
-    def _format_connection_status(self, state: str) -> str:
-        return {
-            'open': '🟢 Conectado',
-            'connecting': '🟡 Conectando',
-            'close': '🔴 Desconectado',
-            'disconnected': '🔴 Desconectado'
-        }.get(state, f'❓ {state}')
-
     def _format_last_seen(self, timestamp) -> str:
         if not timestamp: return 'Nunca'
         try:
