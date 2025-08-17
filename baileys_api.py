@@ -4,6 +4,7 @@ Baileys API client (multi-sessão, compatível com o servidor incluso em /bailey
 - Gera QR por sessão
 - Envia mensagem por sessão (via body.session_id)
 - Status/reconnect por sessão
+- Endpoints não suportados no servidor atual retornam erro amigável
 """
 
 import os
@@ -12,7 +13,7 @@ import logging
 import json
 import time
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -40,24 +41,27 @@ class BaileysAPI:
         self._status_cache: Dict[str, Any] = {}
         self._cache_timeout = 300  # 5min
 
-        # Rotas compatíveis com /baileys-server/server.js
+        # Rotas do servidor atual (vide /baileys-server/server.js)
         self._paths = {
             "status":        "status/{session}",
-            "qr":            "qr/{session}",
-            "send_message":  "send-message",
+            "qr":            "qr/{session}",            # também existe GET /qr?sessionId=
+            "send_message":  "send-message",            # requer body.session_id
             "reconnect":     "reconnect/{session}",
             "health":        "health",
             "sessions":      "sessions",
+            # Não suportados: send-image, send-document, check-number, messages, chat-info, logout
         }
 
-    # --------------------- Sessão ---------------------
+        logger.info(f"Baileys API inicializada em {self.base_url} (sessão padrão: {self.default_session})")
+
+    # --------------------- Helpers de sessão ---------------------
     def get_user_session(self, chat_id_usuario: Optional[int]) -> str:
         return self.default_session if chat_id_usuario is None else f"user_{chat_id_usuario}"
 
     def _resolve_session(self, chat_id_usuario: Optional[int] = None, explicit_session: Optional[str] = None) -> str:
         return explicit_session or self.get_user_session(chat_id_usuario)
 
-    # --------------------- HTTP com retry ---------------------
+    # --------------------- HTTP base com retry -------------------
     def _make_request(self, endpoint: str, method: str = 'GET', data: Dict = None, retries: Optional[int] = None, params: Dict = None) -> Dict:
         if retries is None:
             retries = self.max_retries
@@ -74,6 +78,8 @@ class BaileysAPI:
                     r = requests.delete(url, headers=self.headers, timeout=self.timeout, params=params)
                 else:
                     raise ValueError(f"Método HTTP não suportado: {method}")
+
+                logger.debug(f"[BaileysAPI] {method} {url} -> {r.status_code}")
 
                 if 200 <= r.status_code < 300:
                     try:
@@ -113,9 +119,8 @@ class BaileysAPI:
                 return {'success': False, 'error': f'Erro inesperado: {e}'}
         return {'success': False, 'error': 'Máximo de tentativas excedido'}
 
-    # --------------------- Status/QR ---------------------
+    # --------------------- Status/QR/Controle --------------------
     def get_status(self, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
-        """Compatível com /status/:sessionId do seu servidor (sem 'success')."""
         try:
             session_name = self._resolve_session(chat_id_usuario, session)
             now = time.time()
@@ -125,71 +130,37 @@ class BaileysAPI:
 
             endpoint = self._paths["status"].format(session=session_name)
             resp = self._make_request(endpoint, 'GET')
-
-            if isinstance(resp, dict) and ("connected" in resp or "status" in resp):
-                connected = bool(resp.get("connected", False))
-                raw_status = str(resp.get("status", "disconnected")).lower()
-                jid = resp.get('session') or ''
-                numero = jid.replace('@s.whatsapp.net', '') if jid else ''
-
-                status_dict = {
-                    'status': '🟢 Conectado' if connected else self._format_connection_status(raw_status),
-                    'connected': connected,
-                    'status_raw': raw_status,
-                    'session': resp.get('session_id', session_name),  # session id explícito
-                    'jid': jid,                                       # JID retornado pelo server
-                    'numero': numero,                                  # número extraído do JID
-                    'qr_available': bool(resp.get('qr_available', False)),
-                    'qr_needed': (not connected) and bool(resp.get('qr_available', False)),
-                    'bateria': None,
-                    'ultima_conexao': 'N/A',
+            if resp.get('success'):
+                data = resp.get('data', {})
+                status = {
+                    'status': self._format_connection_status((data or {}).get('state', 'disconnected')),
+                    'numero': ((data or {}).get('user') or {}).get('id', '').replace('@s.whatsapp.net', ''),
+                    'bateria': ((data or {}).get('battery') or {}).get('percentage'),
+                    'ultima_conexao': self._format_last_seen((data or {}).get('lastSeen')),
+                    'qr_needed': bool((data or {}).get('qr')),
+                    'mensagens_enviadas': ((data or {}).get('stats') or {}).get('sent', 0),
+                    'mensagens_falharam': ((data or {}).get('stats') or {}).get('failed', 0),
+                    'fila_pendente': ((data or {}).get('stats') or {}).get('pending', 0),
+                    'session': session_name
                 }
-
-                self._status_cache[cache_key] = status_dict
+                self._status_cache[cache_key] = status
                 self._status_cache[f'{cache_key}_timestamp'] = now
-                return status_dict
-
+                return status
             return {
                 'status': '🔴 Erro na conexão',
-                'connected': False,
-                'status_raw': 'error',
-                'session': session_name,
-                'jid': '',
-                'numero': '',
-                'qr_available': False,
-                'qr_needed': True,
+                'numero': 'N/A',
                 'bateria': None,
                 'ultima_conexao': 'N/A',
-                'error': resp.get('error', 'Resposta inesperada do servidor') if isinstance(resp, dict) else 'Resposta inesperada do servidor',
+                'qr_needed': True,
+                'mensagens_enviadas': 0,
+                'mensagens_falharam': 0,
+                'fila_pendente': 0,
+                'error': resp.get('error', 'Erro desconhecido'),
+                'session': session_name
             }
-
         except Exception as e:
             logger.error(f"Erro ao obter status: {e}")
-            return {
-                'status': '❌ Erro interno',
-                'connected': False,
-                'status_raw': 'internal_error',
-                'session': session_name if 'session_name' in locals() else None,
-                'jid': '',
-                'numero': '',
-                'qr_available': False,
-                'qr_needed': True,
-                'bateria': None,
-                'ultima_conexao': 'N/A',
-                'error': str(e)
-            }
-
-    def _format_connection_status(self, state: str) -> str:
-        status_map = {
-            'open': '🟢 Conectado',
-            'connected': '🟢 Conectado',
-            'connecting': '🟡 Conectando',
-            'qr_ready': '🟡 Aguardando leitura do QR',
-            'close': '🔴 Desconectado',
-            'disconnected': '🔴 Desconectado',
-            'error': '🔴 Erro'
-        }
-        return status_map.get(str(state).lower(), f'❓ {state}')
+            return {'status': '❌ Erro interno', 'error': str(e)}
 
     def generate_qr_code(self, chat_id_usuario: Optional[int] = None, session: Optional[str] = None) -> Dict:
         """GET /qr/:sessionId (servidor também aceita /qr?sessionId=)"""
@@ -197,7 +168,7 @@ class BaileysAPI:
             session_name = self._resolve_session(chat_id_usuario, session)
             endpoint = self._paths["qr"].format(session=session_name)
             resp = self._make_request(endpoint, 'GET')
-            if resp.get('success') or ('qr' in resp or 'qr_image' in resp):
+            if resp.get('success'):
                 data = resp.get('data', resp)
                 return {
                     'success': True,
@@ -222,7 +193,7 @@ class BaileysAPI:
             logger.error(f"Erro ao reconectar: {e}")
             return {'success': False, 'error': str(e)}
 
-    # --------------------- Envio ---------------------
+    # --------------------- Envio de mensagem ---------------------
     def send_message(self, phone: str, message: str, chat_id_usuario: Optional[int] = None, session: Optional[str] = None, options: Optional[Dict] = None) -> Dict:
         """POST /send-message (body: number, message, session_id)"""
         try:
@@ -251,7 +222,7 @@ class BaileysAPI:
             logger.error(f"Erro ao enviar mensagem: {e}")
             return {'success': False, 'error': str(e)}
 
-    # --------------------- Utilidades ---------------------
+    # --------------------- Utilidades ----------------------------
     def health_check(self) -> Dict:
         try:
             return self._make_request(self._paths["health"], 'GET')
@@ -289,7 +260,7 @@ class BaileysAPI:
             logger.error(f"Erro ao atualizar configurações: {e}")
             return False
 
-    # --------------------- Telefones ---------------------
+    # --------------------- Telefones -----------------------------
     def _clean_phone_number(self, phone: str) -> str:
         if not phone: return ""
         clean = ''.join(filter(str.isdigit, phone))
@@ -299,7 +270,15 @@ class BaileysAPI:
             return f"55{clean}"
         return ""
 
-    # --------------------- Formatação ---------------------
+    # --------------------- Formatação ----------------------------
+    def _format_connection_status(self, state: str) -> str:
+        return {
+            'open': '🟢 Conectado',
+            'connecting': '🟡 Conectando',
+            'close': '🔴 Desconectado',
+            'disconnected': '🔴 Desconectado'
+        }.get(state, f'❓ {state}')
+
     def _format_last_seen(self, timestamp) -> str:
         if not timestamp: return 'Nunca'
         try:
