@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const { DisconnectReason, default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 const express = require('express');
 const QRCode = require('qrcode');
 const cors = require('cors');
@@ -14,6 +14,9 @@ app.use(express.json());
 
 // Estado global para múltiplas sessões
 const sessions = new Map(); // sessionId -> { sock, qrCode, isConnected, status, backupInterval }
+const SESSIONS_DIR = process.env.SESSIONS_DIR || path.join(__dirname, 'sessions');
+if (!fs.existsSync(SESSIONS_DIR)) { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); }
+
 let defaultSessionId = 'default';
 
 // Sistema de backup da sessão para PostgreSQL (por sessão específica)
@@ -80,6 +83,9 @@ const restoreSessionFromDatabase = async (sessionId) => {
 
 // Função para conectar ao WhatsApp (por sessão específica)
 async function connectToWhatsApp(sessionId = defaultSessionId) {
+const authPath = path.join(SESSIONS_DIR, String(sessionId));
+const { state, saveCreds } = await useMultiFileAuthState(authPath);
+
     try {
         console.log(`🔄 Iniciando conexão com WhatsApp para sessão ${sessionId}...`);
         
@@ -101,7 +107,7 @@ async function connectToWhatsApp(sessionId = defaultSessionId) {
         
         const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${sessionId}`);
         
-        session.sock = makeWASocket({
+        session.sock = makeWASocket({ auth: state, printQRInTerminal: false, 
             auth: state,
             printQRInTerminal: false
         });
@@ -534,6 +540,29 @@ app.get('/', (req, res) => {
 });
 
 // Iniciar servidor
+// Pré-carrega sessões existentes do disco (opcional)
+async function preloadSessions() {
+    try {
+        const dirs = fs.readdirSync(SESSIONS_DIR, { withFileTypes: true })
+            .filter(d => d.isDirectory())
+            .map(d => d.name);
+        for (const sid of dirs) {
+            if (!sessions.has(sid)) {
+                console.log(`🔁 Restaurando sessão persistida: ${sid}`);
+                try {
+                    await connectToWhatsApp(sid);
+                } catch (e) {
+                    console.error(`Falha ao restaurar sessão ${sid}:`, e?.message || e);
+                }
+            }
+        }
+    } catch (e) {
+        console.warn("Não foi possível listar SESSIONS_DIR para preload:", e?.message || e);
+    }
+}
+
+preloadSessions();
+
 app.listen(PORT, () => {
     console.log(`🚀 Baileys API rodando na porta ${PORT}`);
     console.log(`📱 Status: http://localhost:${PORT}/status`);
