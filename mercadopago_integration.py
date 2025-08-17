@@ -143,14 +143,63 @@ class MercadoPagoIntegration:
             if status_result['success']:
                 return {
                     'success': True,
+                    'payment_status': status_result['status'],
                     'payment_id': payment_id,
-                    'status': status_result['status'],
                     'external_reference': status_result.get('external_reference'),
-                    'valor': status_result.get('transaction_amount'),
-                    'aprovado': status_result['status'] == 'approved'
+                    'amount': status_result.get('transaction_amount'),
+                    'date_approved': status_result.get('date_approved')
                 }
+            else:
+                return status_result
+                
+        except Exception as e:
+            logger.error(f"Erro ao processar webhook: {e}")
+            return {'success': False, 'message': 'Erro interno no webhook'}
+    
+    def verificar_pagamento(self, payment_id):
+        """Alias para verificar_status_pagamento - compatibilidade"""
+        return self.verificar_status_pagamento(payment_id)
+    
+    def listar_pagamentos_pendentes(self, external_reference=None):
+        """Lista pagamentos pendentes ou por referência"""
+        try:
+            if not self.access_token:
+                return {'success': False, 'message': 'Mercado Pago não configurado'}
             
-            return status_result
+            headers = {
+                'Authorization': f'Bearer {self.access_token}'
+            }
+            
+            # Parâmetros para buscar pagamentos
+            params = {
+                'status': 'pending',
+                'limit': 50
+            }
+            
+            if external_reference:
+                params['external_reference'] = external_reference
+            
+            response = requests.get(
+                f'{self.base_url}/v1/payments/search',
+                headers=headers,
+                params=params,
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    'success': True,
+                    'payments': data.get('results', []),
+                    'total': data.get('paging', {}).get('total', 0)
+                }
+            else:
+                logger.error(f"Erro ao listar pagamentos: {response.status_code}")
+                return {'success': False, 'message': 'Erro ao buscar pagamentos'}
+                
+        except Exception as e:
+            logger.error(f"Erro ao listar pagamentos: {e}")
+            return {'success': False, 'message': 'Erro interno'}
             
         except Exception as e:
             logger.error(f"Erro ao processar webhook: {e}")

@@ -17,7 +17,7 @@ from database import DatabaseManager
 from templates import TemplateManager
 from baileys_api import BaileysAPI
 from scheduler import MessageScheduler
-from baileys_clear import BaileysCleaner
+# from baileys_clear import BaileysCleaner  # Removido - não utilizado
 from schedule_config import ScheduleConfig
 from whatsapp_session_api import session_api, init_session_manager
 from user_management import UserManager
@@ -75,6 +75,7 @@ class TelegramBot:
         # Estado das conversações
         self.conversation_states = {}
         self.user_data = {}
+        self.user_states = {}  # Para gerenciar estados de criação de templates
     
     def send_message(self, chat_id, text, parse_mode=None, reply_markup=None):
         """Envia mensagem via API HTTP"""
@@ -110,9 +111,11 @@ class TelegramBot:
     
     def initialize_services(self):
         """Inicializa os serviços do bot"""
+        services_failed = []
+        
+        # Inicializar banco de dados com retry
+        logger.info("🔄 Inicializando banco de dados...")
         try:
-            # Inicializar banco de dados com retry
-            logger.info("🔄 Inicializando banco de dados...")
             self.db = DatabaseManager()
             
             # Verificar se a inicialização do banco foi bem-sucedida
@@ -136,43 +139,84 @@ class TelegramBot:
             self.user_manager = UserManager(self.db)
             logger.info("✅ User Manager inicializado")
             
+        except Exception as e:
+            logger.error(f"Erro ao inicializar banco de dados: {e}")
+            services_failed.append("banco_dados")
+            # Continuar sem banco de dados por enquanto
+            self.db = None
+            self.user_manager = None
+            
+        # Inicializar outros serviços mesmo se banco falhou
+        try:
             # Inicializar integração Mercado Pago
             self.mercado_pago = MercadoPagoIntegration()
             logger.info("✅ Mercado Pago inicializado")
-            
-            # Inicializar gerenciador de sessões WhatsApp
-            init_session_manager(self.db)
-            logger.info("✅ WhatsApp Session Manager inicializado")
-            
-            # Inicializar template manager
-            self.template_manager = TemplateManager(self.db)
-            logger.info("✅ Template manager inicializado")
-            
+        except Exception as e:
+            logger.error(f"Erro Mercado Pago: {e}")
+            services_failed.append("mercado_pago")
+            self.mercado_pago = None
+        
+        try:
+            # Inicializar gerenciador de sessões WhatsApp (apenas se banco disponível)
+            if self.db:
+                init_session_manager(self.db)
+                logger.info("✅ WhatsApp Session Manager inicializado")
+        except Exception as e:
+            logger.error(f"Erro Session Manager: {e}")
+            services_failed.append("session_manager")
+        
+        try:
+            # Inicializar template manager (apenas se banco disponível)
+            if self.db:
+                self.template_manager = TemplateManager(self.db)
+                logger.info("✅ Template manager inicializado")
+        except Exception as e:
+            logger.error(f"Erro Template Manager: {e}")
+            services_failed.append("template_manager")
+            self.template_manager = None
+        
+        try:
             # Inicializar Baileys API
             self.baileys_api = BaileysAPI()
             logger.info("✅ Baileys API inicializada")
-            
-            # Inicializar agendador
-            self.scheduler = MessageScheduler(self.db, self.baileys_api, self.template_manager)
-            self.scheduler_instance = self.scheduler  # Referência para usar nos jobs
-            self.scheduler.start()
-            logger.info("✅ Agendador inicializado")
-            
-            # Inicializar configurador de horários
-            self.schedule_config = ScheduleConfig(self)
-            logger.info("✅ Schedule config inicializado")
-            
-            # Inicializar Baileys Cleaner
-            self.baileys_cleaner = BaileysCleaner()
-            logger.info("✅ Baileys Cleaner inicializado")
-            
-            logger.info("✅ Todos os serviços inicializados")
-            return True
-            
         except Exception as e:
-            logger.error(f"Erro ao inicializar serviços: {e}")
-            logger.error(f"Detalhes do erro: {type(e).__name__}: {str(e)}")
-            return False
+            logger.error(f"Erro Baileys API: {e}")
+            services_failed.append("baileys_api")
+            self.baileys_api = None
+        
+        try:
+            # Inicializar agendador (apenas se dependências disponíveis)
+            if self.db and self.baileys_api and self.template_manager:
+                self.scheduler = MessageScheduler(self.db, self.baileys_api, self.template_manager)
+                # Definir instância do bot no scheduler para alertas automáticos
+                self.scheduler.set_bot_instance(self)
+                self.scheduler_instance = self.scheduler
+                self.scheduler.start()
+                logger.info("✅ Agendador inicializado")
+        except Exception as e:
+            logger.error(f"Erro Agendador: {e}")
+            services_failed.append("agendador")
+            self.scheduler = None
+        
+        try:
+            # Inicializar configurador de horários
+            if self.db:
+                self.schedule_config = ScheduleConfig(self)
+                logger.info("✅ Schedule config inicializado")
+        except Exception as e:
+            logger.error(f"Erro Schedule Config: {e}")
+            services_failed.append("schedule_config")
+            self.schedule_config = None
+        
+        # Remover referência ao BaileysCleaner que não existe mais
+        # self.baileys_cleaner = None
+        
+        if services_failed:
+            logger.warning(f"⚠️ Alguns serviços falharam na inicialização: {', '.join(services_failed)}")
+        else:
+            logger.info("✅ Todos os serviços inicializados")
+        
+        return len(services_failed) == 0
     
     def is_admin(self, chat_id):
         """Verifica se é o admin"""
@@ -208,7 +252,7 @@ class TelegramBot:
                         cursor.execute("""
                             INSERT INTO configuracoes (chave, valor, descricao, chat_id_usuario)
                             VALUES (%s, %s, %s, %s)
-                            ON CONFLICT DO NOTHING
+                            ON CONFLICT (chave, chat_id_usuario) DO NOTHING
                         """, (chave, valor, desc, chat_id))
                     
                     logger.info(f"✅ Configurações criadas para usuário {chat_id}")
@@ -275,17 +319,28 @@ class TelegramBot:
             'resize_keyboard': True
         }
     
-    def criar_teclado_tipos_template(self):
-        """Cria teclado para tipos de template"""
-        return {
-            'keyboard': [
-                [{'text': '💰 Cobrança'}, {'text': '👋 Boas Vindas'}],
-                [{'text': '⚠️ Vencimento'}, {'text': '🔄 Renovação'}],
-                [{'text': '❌ Cancelamento'}, {'text': '📝 Geral'}],
-                [{'text': '❌ Cancelar'}]
-            ],
-            'resize_keyboard': True
-        }
+    def criar_teclado_tipos_template_completo(self):
+        """Cria teclado completo para tipos de template"""
+        keyboard = [
+            ['👋 Boas Vindas', '⏰ 2 Dias Antes'],
+            ['⚠️ 1 Dia Antes', '📅 Vencimento Hoje'], 
+            ['🔴 1 Dia Após Vencido', '💰 Cobrança Geral'],
+            ['🔄 Renovação', '📝 Personalizado'],
+            ['❌ Cancelar']
+        ]
+        return {'keyboard': keyboard, 'resize_keyboard': True, 'one_time_keyboard': True}
+    
+    def criar_teclado_configuracoes(self):
+        """Cria teclado persistente para configurações"""
+        keyboard = [
+            ['🏢 Dados da Empresa', '💳 Configurar PIX'],
+            ['📱 Status WhatsApp', '📝 Templates'],
+            ['⏰ Agendador', '⚙️ Horários'],
+            ['🔔 Notificações', '📊 Sistema'],
+            ['📚 Guia do Usuário'],
+            ['🔙 Menu Principal']
+        ]
+        return {'keyboard': keyboard, 'resize_keyboard': True}
     
     def criar_teclado_planos(self):
         """Cria teclado para seleção de planos"""
@@ -366,6 +421,19 @@ class TelegramBot:
                 
                 logger.info(f"Processando estado de conversação para {chat_id}")
                 self.handle_conversation_state(chat_id, text, user_state)
+                return
+            
+            # CRÍTICO: Interceptar botão de renovação ANTES da verificação de acesso
+            if text in ['💳 Renovar por R$ 20,00', '💳 Renovar Agora']:
+                logger.info(f"🎯 INTERCEPTADO BOTÃO DE RENOVAÇÃO! Usuário: {chat_id} - Texto: '{text}'")
+                # Limpar todos os flags para permitir processamento
+                if hasattr(self, '_payment_requested') and chat_id in self._payment_requested:
+                    self._payment_requested.discard(chat_id)
+                if hasattr(self, '_last_payment_request') and chat_id in self._last_payment_request:
+                    del self._last_payment_request[chat_id]
+                
+                logger.info(f"💳 Processando renovação INTERCEPTADA para usuário {chat_id}")
+                self.processar_renovacao_direto(chat_id)
                 return
             
             # Garantir isolamento de dados do usuário
@@ -642,10 +710,20 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
             self.gestao_clientes_menu(chat_id)
         
         elif text == '➕ Adicionar Cliente':
-            self.iniciar_cadastro_cliente(chat_id)
+            if not self.db:
+                self.send_message(chat_id, 
+                    "❌ Sistema de usuários não inicializado. Banco de dados não disponível. Tente novamente em alguns minutos.",
+                    reply_markup=self.criar_teclado_admin() if self.is_admin(chat_id) else self.criar_teclado_usuario())
+            else:
+                self.iniciar_cadastro_cliente(chat_id)
         
         elif text == '📋 Listar Clientes':
-            self.listar_clientes(chat_id)
+            if not self.db:
+                self.send_message(chat_id, 
+                    "❌ Sistema de usuários não inicializado. Banco de dados não disponível. Tente novamente em alguns minutos.",
+                    reply_markup=self.criar_teclado_admin() if self.is_admin(chat_id) else self.criar_teclado_usuario())
+            else:
+                self.listar_clientes(chat_id)
         
         elif text == '🔍 Buscar Cliente':
             self.iniciar_busca_cliente(chat_id)
@@ -704,12 +782,40 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
         elif text == '⏰ Agendador':
             self.agendador_menu(chat_id)
         
+        # Handlers para botões do menu de configurações
+        elif text == '🏢 Dados da Empresa':
+            self.config_empresa(chat_id)
+        
+        elif text == '💳 Configurar PIX':
+            self.config_pix(chat_id)
+        
+        elif text == '📱 Status WhatsApp':
+            self.config_baileys_status(chat_id)
+        
+        elif text == '⚙️ Horários':
+            self.config_horarios(chat_id)
+        
+        elif text == '🔔 Notificações':
+            self.config_notificacoes(chat_id)
+        
+        elif text == '📊 Sistema':
+            self.config_sistema(chat_id)
+        
+        elif text == '📚 Guia do Usuário':
+            self.mostrar_guia_usuario(chat_id)
+        
         # Novos comandos para sistema multi-usuário
         elif text == '👑 Gestão de Usuários':
             self.gestao_usuarios_menu(chat_id)
         
         elif text == '💰 Faturamento':
             self.faturamento_menu(chat_id)
+        
+        elif text == '💳 Transações Recentes':
+            self.transacoes_recentes_admin(chat_id)
+        
+        elif text == '⏳ Pendências':
+            self.listar_pagamentos_pendentes_admin(chat_id)
         
         elif text == '👥 Gestão de Clientes':
             if not self.is_admin(chat_id):
@@ -735,7 +841,16 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
         
         # Comandos de pagamento
         elif text == '💳 Renovar por R$ 20,00' or text == '💳 Renovar Agora':
-            self.processar_renovacao(chat_id)
+            # Limpar todos os flags para permitir processamento
+            if hasattr(self, '_payment_requested') and chat_id in self._payment_requested:
+                self._payment_requested.discard(chat_id)
+            if hasattr(self, '_last_payment_request') and chat_id in self._last_payment_request:
+                del self._last_payment_request[chat_id]
+            
+            logger.info(f"🎯 DETECTADO BOTÃO DE RENOVAÇÃO! Usuário: {chat_id} - Texto: '{text}'")
+            logger.info(f"💳 Processando renovação para usuário {chat_id}")
+            self.processar_renovacao_direto(chat_id)
+            return  # IMPORTANTE: Sair aqui para não continuar processamento
         
         # Comandos específicos de gestão de usuários
         elif text == '📋 Listar Usuários':
@@ -752,6 +867,9 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
         
         elif text == '📊 Estatísticas Usuários':
             self.estatisticas_usuarios_admin(chat_id)
+        
+        elif text == '📊 Estatísticas Detalhadas':
+            self.estatisticas_detalhadas_admin(chat_id)
         
         elif text == '⚠️ Usuários Vencendo':
             self.listar_usuarios_vencendo_admin(chat_id)
@@ -861,7 +979,19 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
             elif step == 'info_adicional':
                 self.receber_info_adicional_cliente(chat_id, text, user_state)
             elif step == 'confirmar':
-                self.confirmar_cadastro_cliente(chat_id, text, user_state)
+                # Verificar se ainda temos um estado válido (para evitar duplo processamento)
+                if chat_id in self.conversation_states and self.conversation_states[chat_id].get('action') == 'cadastrar_cliente':
+                    self.confirmar_cadastro_cliente(chat_id, text, user_state)
+            return
+        
+        # Verificar se é cadastro de usuário admin
+        if user_state.get('action') == 'cadastro_usuario_admin':
+            self.processar_cadastro_usuario_admin(chat_id, text, user_state)
+            return
+        
+        # Verificar se é busca de usuário admin
+        if user_state.get('action') == 'buscar_usuario':
+            self.processar_busca_usuario_admin(chat_id, text, user_state)
             return
         
         # Se chegou aqui, estado não reconhecido
@@ -889,7 +1019,13 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
                         if motivo == 'usuario_nao_cadastrado':
                             self.iniciar_cadastro_usuario(chat_id, {'id': chat_id})
                         elif motivo in ['teste_expirado', 'plano_vencido', 'sem_plano_ativo']:
-                            self.solicitar_pagamento(chat_id, acesso_info.get('usuario'))
+                            # Evitar loop no start_command
+                            if not hasattr(self, '_payment_requested'):
+                                self._payment_requested = set()
+                            
+                            if chat_id not in self._payment_requested:
+                                self._payment_requested.add(chat_id)
+                                self.solicitar_pagamento(chat_id, acesso_info.get('usuario'))
                         else:
                             self.send_message(chat_id, "❌ Erro interno. Entre em contato com o suporte.")
                 else:
@@ -1060,11 +1196,25 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
     
     def receber_telefone_cliente(self, chat_id, text, user_state):
         """Recebe telefone do cliente"""
-        telefone = ''.join(filter(str.isdigit, text))
+        # Aplicar padronização automática de telefone
+        from utils import padronizar_telefone, validar_telefone_whatsapp, formatar_telefone_exibicao
         
-        if len(telefone) < 10:
+        telefone_original = text.strip()
+        telefone_padronizado = padronizar_telefone(telefone_original)
+        
+        # Validar telefone padronizado
+        if not validar_telefone_whatsapp(telefone_padronizado):
             self.send_message(chat_id,
-                "❌ Telefone inválido. Digite um telefone válido (apenas números):",
+                f"❌ *Telefone inválido*\n\n"
+                f"O número informado ({telefone_original}) não é válido para WhatsApp.\n\n"
+                f"✅ *Formatos aceitos:*\n"
+                f"• (11) 99999-9999 → (11) 9999-9999\n"
+                f"• 11 99999-9999 → (11) 9999-9999\n"
+                f"• 11999999999 → (11) 9999-9999\n"
+                f"• +55 11 99999-9999 → (11) 9999-9999\n"
+                f"ℹ️ *Baileys usa formato de 8 dígitos*\n\n"
+                f"Digite novamente o telefone:",
+                parse_mode='Markdown',
                 reply_markup=self.criar_teclado_cancelar())
             return
         
@@ -1072,15 +1222,28 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
         clientes_existentes = []
         try:
             if self.db:
-                clientes_existentes = self.db.buscar_clientes_por_telefone(telefone)
+                clientes_existentes = self.db.buscar_clientes_por_telefone(telefone_padronizado)
         except:
             pass
         
-        user_state['dados']['telefone'] = telefone
+        # Mostrar telefone formatado para confirmação
+        telefone_formatado = formatar_telefone_exibicao(telefone_padronizado)
+        
+        # Informar conversão se houve mudança no formato
+        from utils import houve_conversao_telefone
+        if houve_conversao_telefone(telefone_original, telefone_padronizado):
+            self.send_message(chat_id,
+                f"✅ *Telefone convertido para padrão Baileys*\n\n"
+                f"📱 *Entrada:* {telefone_original}\n"
+                f"📱 *Convertido:* {telefone_formatado}\n\n"
+                f"ℹ️ *O sistema converteu automaticamente para o formato aceito pela API WhatsApp.*",
+                parse_mode='Markdown')
+        
+        user_state['dados']['telefone'] = telefone_padronizado
         user_state['step'] = 'plano'
         
         # Mensagem base
-        mensagem = f"✅ Telefone: *{telefone}*"
+        mensagem = f"✅ Telefone: *{telefone_formatado}*"
         
         # Adicionar aviso se já existem clientes com este telefone
         if clientes_existentes:
@@ -1394,6 +1557,14 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
                     dados.get('info_adicional')
                 )
                 
+                # Criar teclado para próxima ação
+                teclado_pos_cadastro = {
+                    'inline_keyboard': [
+                        [{'text': '➕ Cadastrar Outro Cliente', 'callback_data': 'cadastrar_outro_cliente'}],
+                        [{'text': '🏠 Voltar ao Menu Principal', 'callback_data': 'voltar_menu_principal'}]
+                    ]
+                }
+                
                 self.send_message(chat_id,
                     f"✅ *Cliente cadastrado com sucesso!*\n\n"
                     f"🆔 ID: *{cliente_id}*\n"
@@ -1402,12 +1573,15 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
                     f"📦 Plano: *{dados['plano']}*\n"
                     f"💰 Valor: *R$ {dados['valor']:.2f}*\n"
                     f"📅 Vencimento: *{dados['vencimento'].strftime('%d/%m/%Y')}*\n\n"
-                    "🎉 Cliente adicionado ao sistema de cobrança automática!",
+                    "🎉 Cliente adicionado ao sistema de cobrança automática!\n\n"
+                    "O que deseja fazer agora?",
                     parse_mode='Markdown',
-                    reply_markup=self.criar_teclado_principal())
+                    reply_markup=teclado_pos_cadastro)
                 
-                # Limpar estado
-                self.cancelar_operacao(chat_id)
+                # Limpar estado de conversação imediatamente para evitar duplo processamento
+                if chat_id in self.conversation_states:
+                    del self.conversation_states[chat_id]
+                    logger.info(f"Estado de conversação limpo para usuário {chat_id} após cadastro bem-sucedido")
                 
             except Exception as e:
                 logger.error(f"Erro ao cadastrar cliente: {e}")
@@ -1440,6 +1614,13 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
     def listar_clientes(self, chat_id):
         """Lista clientes com informações completas organizadas"""
         try:
+            # Verificar se banco de dados está disponível
+            if not self.db:
+                self.send_message(chat_id, 
+                    "❌ Sistema de banco de dados não inicializado. Tente novamente em alguns minutos.",
+                    reply_markup=self.criar_teclado_admin() if self.is_admin(chat_id) else self.criar_teclado_usuario())
+                return
+            
             # CORREÇÃO CRÍTICA: Filtrar clientes por usuário para isolamento completo
             clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id)
             
@@ -1727,6 +1908,12 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
             elif callback_data == 'menu_principal':
                 self.start_command(chat_id)
             
+            elif callback_data == 'cadastrar_outro_cliente':
+                self.iniciar_cadastro_cliente(chat_id)
+            
+            elif callback_data == 'voltar_menu_principal':
+                self.start_command(chat_id)
+            
             elif callback_data.startswith('template_detalhes_'):
                 template_id = int(callback_data.split('_')[2])
                 logger.info(f"Callback recebido para template detalhes: {template_id}")
@@ -1807,6 +1994,44 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
             elif callback_data.startswith('set_envio_'):
                 horario = callback_data.replace('set_envio_', '')
                 self.schedule_config.set_horario_envio(chat_id, horario)
+            
+            # Handlers do Guia do Usuário
+            elif callback_data == 'guia_usuario':
+                self.mostrar_guia_usuario(chat_id)
+            elif callback_data == 'guia_primeiros_passos':
+                self.mostrar_guia_primeiros_passos(chat_id)
+            elif callback_data == 'guia_whatsapp':
+                self.mostrar_guia_whatsapp(chat_id)
+            elif callback_data == 'guia_clientes':
+                self.mostrar_guia_clientes(chat_id)
+            elif callback_data == 'guia_templates':
+                self.mostrar_guia_templates(chat_id)
+            elif callback_data == 'guia_envios':
+                self.mostrar_guia_envios(chat_id)
+            elif callback_data == 'guia_automacao':
+                self.mostrar_guia_automacao(chat_id)
+            elif callback_data == 'guia_relatorios':
+                self.mostrar_guia_relatorios(chat_id)
+            elif callback_data == 'guia_problemas':
+                self.mostrar_guia_problemas(chat_id)
+            elif callback_data == 'guia_dicas':
+                self.mostrar_guia_dicas(chat_id)
+            
+            # Handlers para templates modelo
+            elif callback_data.startswith('usar_modelo_'):
+                tipo = callback_data.replace('usar_modelo_', '')
+                self.usar_template_modelo(chat_id, tipo)
+            elif callback_data.startswith('editar_modelo_'):
+                tipo = callback_data.replace('editar_modelo_', '')
+                self.editar_template_modelo(chat_id, tipo)
+            elif callback_data == 'criar_do_zero':
+                self.criar_template_do_zero(chat_id)
+            elif callback_data == 'voltar_tipo_template':
+                self.voltar_selecao_tipo_template(chat_id)
+            elif callback_data == 'confirmar_template':
+                self.confirmar_criacao_template(chat_id)
+            elif callback_data == 'editar_conteudo_template':
+                self.editar_conteudo_template(chat_id)
                 
             elif callback_data.startswith('set_verificacao_'):
                 horario = callback_data.replace('set_verificacao_', '')
@@ -2086,6 +2311,51 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
             
             elif callback_data == 'cancelar':
                 self.cancelar_operacao(chat_id)
+            
+            # ===== CALLBACKS ADMINISTRATIVOS FALTANTES =====
+            # Callbacks de gestão de usuários (admin)
+            elif callback_data == 'gestao_usuarios':
+                self.gestao_usuarios_menu(chat_id)
+            
+            elif callback_data == 'listar_usuarios':
+                self.listar_todos_usuarios_admin(chat_id)
+            
+            elif callback_data == 'cadastrar_usuario':
+                self.iniciar_cadastro_usuario_admin(chat_id)
+            
+            elif callback_data == 'buscar_usuario':
+                self.buscar_usuario_admin(chat_id)
+            
+            elif callback_data == 'estatisticas_usuarios':
+                self.estatisticas_usuarios_admin(chat_id)
+            
+            elif callback_data == 'usuarios_vencendo':
+                self.listar_usuarios_vencendo_admin(chat_id)
+            
+            elif callback_data == 'pagamentos_pendentes':
+                self.listar_pagamentos_pendentes_admin(chat_id)
+            
+            elif callback_data == 'enviar_cobranca_geral':
+                self.enviar_cobranca_geral_admin(chat_id)
+            
+            # Callbacks para geração de PIX automático
+            elif callback_data.startswith('gerar_pix_usuario_'):
+                user_id = callback_data.replace('gerar_pix_usuario_', '')
+                self.processar_gerar_pix_usuario(chat_id, user_id)
+            
+            elif callback_data.startswith('gerar_pix_renovacao_'):
+                user_id = callback_data.replace('gerar_pix_renovacao_', '')
+                self.processar_gerar_pix_renovacao(chat_id, user_id)
+            
+            # Callbacks de faturamento
+            elif callback_data == 'faturamento_menu':
+                self.faturamento_menu(chat_id)
+            
+            elif callback_data == 'faturamento_detalhado':
+                self.faturamento_detalhado_admin(chat_id)
+            
+            elif callback_data == 'relatorio_usuarios':
+                self.gerar_relatorio_mensal_admin(chat_id)
             
             # Callbacks de relatórios
             elif callback_data == 'relatorio_periodo':
@@ -3350,16 +3620,44 @@ Exemplo: `15/12/2025`"""
                 campo_db = 'nome'
             
             elif campo == 'telefone':
-                telefone = ''.join(filter(str.isdigit, text))
-                if len(telefone) < 10:
-                    self.send_message(chat_id, "❌ Telefone deve ter pelo menos 10 dígitos.")
+                # Aplicar padronização automática de telefone
+                from utils import padronizar_telefone, validar_telefone_whatsapp, formatar_telefone_exibicao
+                
+                telefone_original = text.strip()
+                telefone = padronizar_telefone(telefone_original)
+                
+                # Validar telefone padronizado
+                if not validar_telefone_whatsapp(telefone):
+                    self.send_message(chat_id, 
+                        f"❌ *Telefone inválido*\n\n"
+                        f"O número informado ({telefone_original}) não é válido para WhatsApp.\n\n"
+                        f"✅ *Formatos aceitos:*\n"
+                        f"• (11) 99999-9999 → (11) 9999-9999\n"
+                        f"• 11 99999-9999 → (11) 9999-9999\n"
+                        f"• 11999999999 → (11) 9999-9999\n"
+                        f"• +55 11 99999-9999 → (11) 9999-9999\n"
+                        f"ℹ️ *Baileys usa formato de 8 dígitos*\n\n"
+                        f"Tente novamente com um formato válido.",
+                        parse_mode='Markdown')
                     return
                 
                 # Verificar duplicata (exceto o próprio cliente)
                 cliente_existente = self.db.buscar_cliente_por_telefone(telefone)
                 if cliente_existente and cliente_existente['id'] != cliente_id:
-                    self.send_message(chat_id, f"❌ Telefone já cadastrado para: {cliente_existente['nome']}")
+                    telefone_formatado = formatar_telefone_exibicao(telefone)
+                    self.send_message(chat_id, f"❌ Telefone {telefone_formatado} já cadastrado para: {cliente_existente['nome']}")
                     return
+                
+                # Informar conversão se houve mudança no formato
+                from utils import houve_conversao_telefone
+                if houve_conversao_telefone(telefone_original, telefone):
+                    telefone_formatado = formatar_telefone_exibicao(telefone)
+                    self.send_message(chat_id,
+                        f"✅ *Telefone convertido para padrão Baileys*\n\n"
+                        f"📱 *Entrada:* {telefone_original}\n"
+                        f"📱 *Convertido:* {telefone_formatado}\n\n"
+                        f"ℹ️ *O sistema converteu automaticamente para o formato aceito pela API WhatsApp.*",
+                        parse_mode='Markdown')
                 
                 novo_valor = telefone
                 campo_db = 'telefone'
@@ -4940,34 +5238,489 @@ Deseja realmente excluir este template?"""
         
         self.send_message(chat_id,
             f"✅ Nome: *{nome}*\n\n"
-            "🏷️ *Passo 2/4:* Selecione o *tipo* do template:",
+            "🏷️ *Passo 2/5:* Selecione o *tipo* do template:",
             parse_mode='Markdown',
-            reply_markup=self.criar_teclado_tipos_template())
+            reply_markup=self.criar_teclado_tipos_template_completo())
     
     def receber_tipo_template(self, chat_id, text, user_state):
         """Recebe tipo do template"""
         tipos_validos = {
-            '💰 Cobrança': 'cobranca',
-            '👋 Boas Vindas': 'boas_vindas', 
-            '⚠️ Vencimento': 'vencimento',
+            '👋 Boas Vindas': 'boas_vindas',
+            '⏰ 2 Dias Antes': 'dois_dias_antes',
+            '⚠️ 1 Dia Antes': 'um_dia_antes',
+            '📅 Vencimento Hoje': 'vencimento_hoje',
+            '🔴 1 Dia Após Vencido': 'um_dia_apos',
+            '💰 Cobrança Geral': 'cobranca',
             '🔄 Renovação': 'renovacao',
-            '❌ Cancelamento': 'cancelamento',
-            '📝 Geral': 'geral'
+            '📝 Personalizado': 'geral'
         }
         
         if text not in tipos_validos:
             self.send_message(chat_id,
                 "❌ Tipo inválido. Selecione uma opção válida:",
-                reply_markup=self.criar_teclado_tipos_template())
+                reply_markup=self.criar_teclado_tipos_template_completo())
             return
         
         tipo = tipos_validos[text]
         user_state['dados']['tipo'] = tipo
+        user_state['step'] = 'modelo_ou_personalizado'
+        
+        # Mostrar template modelo para o tipo selecionado
+        self.mostrar_template_modelo(chat_id, user_state, tipo, text)
+    
+    def mostrar_template_modelo(self, chat_id, user_state, tipo, tipo_texto):
+        """Mostra template modelo pronto para o tipo selecionado"""
+        nome = user_state['dados']['nome']
+        
+        # Templates modelo por tipo
+        templates_modelo = {
+            'boas_vindas': """🎉 Olá {nome}!
+
+Seja bem-vindo(a) ao nosso serviço!
+
+📋 *Seus dados:*
+• Nome: {nome}
+• Telefone: {telefone}
+• Plano: {pacote}
+• Valor: R$ {valor}
+• Vencimento: {vencimento}
+
+📱 *Informações importantes:*
+• Mantenha seus dados sempre atualizados
+• Em caso de dúvidas, entre em contato
+• Seu acesso será liberado em breve
+
+✅ Obrigado por escolher nossos serviços!""",
+
+            'dois_dias_antes': """⏰ Olá {nome}!
+
+Seu plano vence em 2 dias: *{vencimento}*
+
+📋 *Detalhes do seu plano:*
+• Plano: {pacote}
+• Valor: R$ {valor}
+• Status: Ativo
+
+💡 *Para renovar:*
+• Faça o pagamento antecipadamente
+• Evite interrupção do serviço
+• Valor: R$ {valor}
+
+💳 *PIX:* sua-chave-pix@email.com
+👤 *Titular:* Sua Empresa
+
+❓ Dúvidas? Entre em contato!""",
+
+            'um_dia_antes': """⚠️ Olá {nome}!
+
+Seu plano vence AMANHÃ: *{vencimento}*
+
+🚨 *ATENÇÃO:*
+• Plano: {pacote}
+• Valor: R$ {valor}
+• Vence em: 24 horas
+
+⚡ *Renove hoje e evite bloqueio!*
+
+💳 *PIX:* sua-chave-pix@email.com
+💰 *Valor:* R$ {valor}
+👤 *Titular:* Sua Empresa
+
+✅ Após o pagamento, envie o comprovante!
+
+📱 Dúvidas? Responda esta mensagem.""",
+
+            'vencimento_hoje': """📅 Olá {nome}!
+
+Seu plano vence HOJE: *{vencimento}*
+
+🔴 *URGENTE - VENCE HOJE:*
+• Plano: {pacote}
+• Valor: R$ {valor}
+• Status: Vence em algumas horas
+
+⚡ *Renove AGORA:*
+
+💳 *PIX:* sua-chave-pix@email.com  
+💰 *Valor:* R$ {valor}
+👤 *Titular:* Sua Empresa
+
+⏰ *Prazo:* Até 23:59 de hoje
+
+✅ Envie o comprovante após pagamento!
+
+📱 Precisa de ajuda? Entre em contato!""",
+
+            'um_dia_apos': """🔴 Olá {nome}!
+
+Seu plano venceu ontem: *{vencimento}*
+
+⚠️ *PLANO VENCIDO:*
+• Plano: {pacote}  
+• Venceu em: {vencimento}
+• Valor: R$ {valor}
+
+🔄 *Para reativar:*
+
+💳 *PIX:* sua-chave-pix@email.com
+💰 *Valor:* R$ {valor}  
+👤 *Titular:* Sua Empresa
+
+✅ Após pagamento, seu acesso será liberado em até 2 horas.
+
+📱 Dúvidas? Responda esta mensagem.
+
+🙏 Contamos com sua compreensão!""",
+
+            'cobranca': """💰 Olá {nome}!
+
+Cobrança referente ao seu plano:
+
+📋 *Detalhes:*
+• Plano: {pacote}
+• Valor: R$ {valor}
+• Vencimento: {vencimento}
+
+💳 *Dados para pagamento:*
+• PIX: sua-chave-pix@email.com
+• Valor: R$ {valor}
+• Titular: Sua Empresa
+
+✅ Envie comprovante após pagamento.
+
+📱 Dúvidas? Entre em contato!""",
+
+            'renovacao': """🔄 Olá {nome}!
+
+Hora de renovar seu plano!
+
+📋 *Dados atuais:*
+• Plano: {pacote}
+• Valor: R$ {valor}
+• Último vencimento: {vencimento}
+
+🎉 *Continue aproveitando:*
+• Todos os benefícios do seu plano
+• Suporte técnico especializado  
+• Qualidade garantida
+
+💳 *PIX:* sua-chave-pix@email.com
+💰 *Valor:* R$ {valor}
+👤 *Titular:* Sua Empresa
+
+✅ Renove agora!""",
+
+            'geral': """📝 *Template Personalizado*
+
+Digite o conteúdo da sua mensagem.
+
+💡 *Variáveis disponíveis:*
+• {nome} - Nome do cliente
+• {telefone} - Telefone  
+• {pacote} - Plano/serviço
+• {valor} - Valor mensal
+• {vencimento} - Data vencimento
+
+Exemplo básico:
+Olá {nome}, seu plano {pacote} no valor de R$ {valor} vence em {vencimento}."""
+        }
+        
+        template_modelo = templates_modelo.get(tipo, templates_modelo['geral'])
+        
+        mensagem = f"""📄 *Template: {nome}*
+🏷️ *Tipo:* {tipo_texto}
+
+📝 *MODELO PRONTO PARA COPIAR:*
+
+```
+{template_modelo}
+```
+
+🎯 *Passo 3/5:* Escolha uma opção:"""
+
+        inline_keyboard = [
+            [
+                {'text': '📋 Usar Este Modelo', 'callback_data': f'usar_modelo_{tipo}'},
+                {'text': '✏️ Editar Modelo', 'callback_data': f'editar_modelo_{tipo}'}
+            ],
+            [
+                {'text': '📝 Criar do Zero', 'callback_data': 'criar_do_zero'}
+            ],
+            [
+                {'text': '🔙 Voltar', 'callback_data': 'voltar_tipo_template'},
+                {'text': '❌ Cancelar', 'callback_data': 'cancelar'}
+            ]
+        ]
+        
+        self.send_message(chat_id, mensagem, 
+                        parse_mode='Markdown',
+                        reply_markup={'inline_keyboard': inline_keyboard})
+                        
+        # Salvar template modelo no estado para uso posterior
+        user_state['template_modelo'] = template_modelo
+        
+    def usar_template_modelo(self, chat_id, tipo):
+        """Usa o template modelo sem modificações"""
+        # Verificar primeiro em conversation_states
+        if chat_id in self.conversation_states and 'action' in self.conversation_states[chat_id]:
+            user_state = self.conversation_states[chat_id]
+        elif chat_id in self.user_states:
+            user_state = self.user_states[chat_id]
+        else:
+            logger.error(f"Estado não encontrado para chat {chat_id}")
+            self.send_message(chat_id, "❌ Erro: Sessão expirada. Inicie novamente.", 
+                            reply_markup=self.criar_teclado_usuario())
+            return
+            
+        template_modelo = user_state.get('template_modelo', '')
+        if not template_modelo:
+            logger.error(f"Template modelo não encontrado para {chat_id}")
+            self.send_message(chat_id, "❌ Erro: Template não encontrado. Inicie novamente.", 
+                            reply_markup=self.criar_teclado_usuario())
+            return
+        
+        user_state['dados']['conteudo'] = template_modelo
+        user_state['step'] = 'confirmar'
+        
+        self.mostrar_confirmacao_template(chat_id, user_state)
+        
+    def editar_template_modelo(self, chat_id, tipo):
+        """Permite editar o template modelo"""
+        # Verificar primeiro em conversation_states
+        if chat_id in self.conversation_states and 'action' in self.conversation_states[chat_id]:
+            user_state = self.conversation_states[chat_id]
+        elif chat_id in self.user_states:
+            user_state = self.user_states[chat_id]
+        else:
+            logger.error(f"Estado não encontrado para chat {chat_id}")
+            self.send_message(chat_id, "❌ Erro: Sessão expirada. Inicie novamente.", 
+                            reply_markup=self.criar_teclado_usuario())
+            return
+            
+        template_modelo = user_state.get('template_modelo', '')
+        nome = user_state['dados']['nome']
+        
+        mensagem = f"""✏️ *Editar Template: {nome}*
+
+📝 *Passo 4/5:* Edite o template modelo abaixo:
+
+💡 *Variáveis disponíveis:*
+• {{nome}} - Nome do cliente
+• {{telefone}} - Telefone do cliente  
+• {{pacote}} - Plano/serviço
+• {{valor}} - Valor mensal
+• {{vencimento}} - Data de vencimento
+
+📝 *Template atual:*
+```
+{template_modelo}
+```
+
+✏️ Digite o novo conteúdo do template (ou copie e modifique o modelo acima):"""
+
+        user_state['step'] = 'conteudo'
+        user_state['dados']['conteudo'] = template_modelo  # Pré-carregar o modelo
+        
+        self.send_message(chat_id, mensagem,
+                        parse_mode='Markdown',
+                        reply_markup=self.criar_teclado_cancelar())
+        
+    def criar_template_do_zero(self, chat_id):
+        """Cria template do zero sem modelo"""
+        # Verificar primeiro em conversation_states
+        if chat_id in self.conversation_states and 'action' in self.conversation_states[chat_id]:
+            user_state = self.conversation_states[chat_id]
+        elif chat_id in self.user_states:
+            user_state = self.user_states[chat_id]
+        else:
+            logger.error(f"Estado não encontrado para chat {chat_id}")
+            self.send_message(chat_id, "❌ Erro: Sessão expirada. Inicie novamente.", 
+                            reply_markup=self.criar_teclado_usuario())
+            return
+            
+        nome = user_state['dados']['nome']
+        
+        mensagem = f"""📝 *Criar Template: {nome}*
+
+🎯 *Passo 4/5:* Digite o conteúdo da mensagem.
+
+💡 *Variáveis disponíveis:*
+• {{nome}} - Nome do cliente
+• {{telefone}} - Telefone do cliente  
+• {{pacote}} - Plano/serviço
+• {{valor}} - Valor mensal
+• {{vencimento}} - Data de vencimento
+
+💬 Digite o conteúdo do template:"""
+
         user_state['step'] = 'conteudo'
         
-        # Mostrar interface com botões de tags
-        self.mostrar_editor_conteudo_template(chat_id, user_state, tipo)
+        self.send_message(chat_id, mensagem,
+                        parse_mode='Markdown',
+                        reply_markup=self.criar_teclado_cancelar())
+        
+    def voltar_selecao_tipo_template(self, chat_id):
+        """Volta para seleção de tipo de template"""
+        # Verificar primeiro em conversation_states
+        if chat_id in self.conversation_states and 'action' in self.conversation_states[chat_id]:
+            user_state = self.conversation_states[chat_id]
+        elif chat_id in self.user_states:
+            user_state = self.user_states[chat_id]
+        else:
+            logger.error(f"Estado não encontrado para chat {chat_id}")
+            self.send_message(chat_id, "❌ Erro: Sessão expirada. Inicie novamente.", 
+                            reply_markup=self.criar_teclado_usuario())
+            return
+            
+        nome = user_state['dados']['nome']
+        
+        user_state['step'] = 'tipo'
+        
+        self.send_message(chat_id,
+            f"✅ Nome: *{nome}*\n\n"
+            "🏷️ *Passo 2/5:* Selecione o *tipo* do template:",
+            parse_mode='Markdown',
+            reply_markup=self.criar_teclado_tipos_template_completo())
+            
+    def mostrar_confirmacao_template(self, chat_id, user_state):
+        """Mostra confirmação final do template"""
+        nome = user_state['dados']['nome']
+        tipo = user_state['dados']['tipo']
+        conteudo = user_state['dados']['conteudo']
+        
+        # Mapear tipo para texto legível
+        tipo_texto_map = {
+            'boas_vindas': '👋 Boas Vindas',
+            'dois_dias_antes': '⏰ 2 Dias Antes',
+            'um_dia_antes': '⚠️ 1 Dia Antes',
+            'vencimento_hoje': '📅 Vencimento Hoje',
+            'um_dia_apos': '🔴 1 Dia Após Vencido',
+            'cobranca': '💰 Cobrança Geral',
+            'renovacao': '🔄 Renovação',
+            'geral': '📝 Personalizado'
+        }
+        
+        tipo_texto = tipo_texto_map.get(tipo, tipo)
+        
+        mensagem = f"""✅ *Confirmação do Template*
+
+📄 *Nome:* {nome}
+🏷️ *Tipo:* {tipo_texto}
+
+📝 *Conteúdo:*
+```
+{conteudo}
+```
+
+🎯 *Passo 5/5:* Confirme a criação do template:"""
+
+        inline_keyboard = [
+            [
+                {'text': '✅ Criar Template', 'callback_data': 'confirmar_template'},
+                {'text': '✏️ Editar Conteúdo', 'callback_data': 'editar_conteudo_template'}
+            ],
+            [
+                {'text': '🔙 Voltar', 'callback_data': 'voltar_tipo_template'},
+                {'text': '❌ Cancelar', 'callback_data': 'cancelar'}
+            ]
+        ]
+        
+        self.send_message(chat_id, mensagem, 
+                        parse_mode='Markdown',
+                        reply_markup={'inline_keyboard': inline_keyboard})
     
+    def confirmar_criacao_template(self, chat_id):
+        """Confirma e cria o template final"""
+        # Verificar primeiro em conversation_states
+        if chat_id in self.conversation_states and 'action' in self.conversation_states[chat_id]:
+            user_state = self.conversation_states[chat_id]
+        elif chat_id in self.user_states:
+            user_state = self.user_states[chat_id]
+        else:
+            logger.error(f"Estado não encontrado para chat {chat_id}")
+            self.send_message(chat_id, "❌ Erro: Sessão expirada. Inicie novamente.", 
+                            reply_markup=self.criar_teclado_usuario())
+            return
+        
+        try:
+            nome = user_state['dados']['nome']
+            tipo = user_state['dados']['tipo']
+            conteudo = user_state['dados']['conteudo']
+            
+            # Criar template no banco
+            template_id = self.template_manager.criar_template(
+                nome=nome,
+                conteudo=conteudo, 
+                tipo=tipo,
+                descricao=f"Template {tipo.replace('_', ' ').title()}",
+                chat_id_usuario=chat_id
+            )
+            
+            # Limpar estado de ambos os dicionários
+            if chat_id in self.conversation_states:
+                del self.conversation_states[chat_id]
+            if chat_id in self.user_states:
+                del self.user_states[chat_id]
+            
+            self.send_message(chat_id,
+                f"✅ *Template criado com sucesso!*\n\n"
+                f"📄 *Nome:* {nome}\n"
+                f"🏷️ *Tipo:* {tipo.replace('_', ' ').title()}\n"
+                f"🆔 *ID:* {template_id}\n\n"
+                f"Seu template está pronto para uso!",
+                parse_mode='Markdown',
+                reply_markup=self.criar_teclado_usuario())
+                
+        except Exception as e:
+            logger.error(f"Erro ao criar template: {e}")
+            self.send_message(chat_id,
+                f"❌ Erro ao criar template: {str(e)}\n\n"
+                "Tente novamente.",
+                reply_markup=self.criar_teclado_usuario())
+            # Limpar estado de ambos os dicionários
+            if chat_id in self.conversation_states:
+                del self.conversation_states[chat_id]
+            if chat_id in self.user_states:
+                del self.user_states[chat_id]
+                
+    def editar_conteudo_template(self, chat_id):
+        """Permite editar o conteúdo do template"""
+        # Verificar primeiro em conversation_states
+        if chat_id in self.conversation_states and 'action' in self.conversation_states[chat_id]:
+            user_state = self.conversation_states[chat_id]
+        elif chat_id in self.user_states:
+            user_state = self.user_states[chat_id]
+        else:
+            logger.error(f"Estado não encontrado para chat {chat_id}")
+            self.send_message(chat_id, "❌ Erro: Sessão expirada. Inicie novamente.", 
+                            reply_markup=self.criar_teclado_usuario())
+            return
+        
+        nome = user_state['dados']['nome']
+        conteudo_atual = user_state['dados']['conteudo']
+        
+        mensagem = f"""✏️ *Editar Template: {nome}*
+
+📝 *Conteúdo atual:*
+```
+{conteudo_atual}
+```
+
+💡 *Variáveis disponíveis:*
+• {{nome}} - Nome do cliente
+• {{telefone}} - Telefone do cliente  
+• {{pacote}} - Plano/serviço
+• {{valor}} - Valor mensal
+• {{vencimento}} - Data de vencimento
+
+✏️ Digite o novo conteúdo do template:"""
+
+        user_state['step'] = 'conteudo'
+        
+        self.send_message(chat_id, mensagem,
+                        parse_mode='Markdown',
+                        reply_markup=self.criar_teclado_cancelar())
+
     def mostrar_editor_conteudo_template(self, chat_id, user_state, tipo):
         """Mostra editor de conteúdo com botões de tags"""
         nome = user_state['dados']['nome']
@@ -5607,6 +6360,9 @@ Envie exatamente neste formato para atualizar todos os dados de uma só vez."""
     def solicitar_pagamento(self, chat_id, usuario=None):
         """Solicita pagamento para usuário com plano vencido"""
         try:
+            # REMOVIDO throttling para crítico de monetização
+            logger.info(f"💳 Solicitando pagamento para usuário {chat_id}")
+            
             if not self.mercado_pago:
                 self.send_message(chat_id, 
                     "❌ Sistema de pagamentos temporariamente indisponível.\n"
@@ -5650,41 +6406,53 @@ Envie exatamente neste formato para atualizar todos os dados de uma só vez."""
             logger.error(f"Erro ao solicitar pagamento: {e}")
             self.send_message(chat_id, "❌ Erro interno. Contate o suporte.")
     
-    def processar_renovacao(self, chat_id):
-        """Processa renovação de plano do usuário"""
+    def processar_renovacao_direto(self, chat_id):
+        """Processa renovação DIRETO sem throttling - CRÍTICO PARA MONETIZAÇÃO"""
         try:
+            logger.info(f"🚀 Iniciando processamento direto de renovação para {chat_id}")
+            
+            # Verificações críticas do sistema
             if not self.mercado_pago:
+                logger.error(f"❌ Mercado Pago não inicializado para usuário {chat_id}")
                 self.send_message(chat_id, 
-                    "❌ Sistema de pagamentos indisponível.\n"
-                    "Configure MERCADOPAGO_ACCESS_TOKEN para ativar.")
+                    "❌ Sistema de pagamentos não está funcionando.\n"
+                    "Entre em contato com o suporte URGENTE.",
+                    reply_markup=self.criar_teclado_usuario())
+                return
+            
+            if not hasattr(self.mercado_pago, 'access_token') or not self.mercado_pago.access_token:
+                logger.error("❌ Token do Mercado Pago não configurado")
+                self.send_message(chat_id, 
+                    "❌ Sistema de pagamentos mal configurado.\n"
+                    "Entre em contato com o suporte.",
+                    reply_markup=self.criar_teclado_usuario())
                 return
             
             if not self.user_manager:
-                self.send_message(chat_id, "❌ Sistema não inicializado.")
+                logger.error(f"❌ User Manager não inicializado para usuário {chat_id}")
+                self.send_message(chat_id, "❌ Sistema de usuários indisponível. Contate o suporte.",
+                                reply_markup=self.criar_teclado_usuario())
                 return
             
             # Obter dados do usuário
+            logger.info(f"📋 Obtendo dados do usuário {chat_id}")
             usuario = self.user_manager.obter_usuario(chat_id)
             if not usuario:
-                self.send_message(chat_id, "❌ Usuário não encontrado.")
+                logger.error(f"❌ Usuário {chat_id} não encontrado no banco")
+                self.send_message(chat_id, "❌ Usuário não cadastrado. Use /start para se cadastrar.",
+                                reply_markup=self.criar_teclado_usuario())
                 return
             
             # Gerar pagamento PIX
             nome = usuario.get('nome', 'Usuário')
             email = usuario.get('email', f'usuario{chat_id}@sistema.com')
             
-            dados_pagamento = {
-                'valor': 20.00,
-                'descricao': 'Renovação Mensal - Bot Gestão Clientes',
-                'pagador': {
-                    'nome': nome,
-                    'email': email,
-                    'telefone': usuario.get('telefone', '')
-                },
-                'usuario_id': chat_id
-            }
+            logger.info(f"💰 Criando cobrança MP para {nome} ({email}) - R$ 20,00")
             
+            # Chamar Mercado Pago diretamente
             resultado = self.mercado_pago.criar_cobranca(chat_id, 20.00, 'Renovação Mensal - Bot Gestão Clientes', email)
+            
+            logger.info(f"📊 Resultado da cobrança MP: {resultado.get('success', False)}")
             
             if resultado['success']:
                 mensagem = f"""💳 *PIX GERADO COM SUCESSO!*
@@ -5718,14 +6486,508 @@ Envie exatamente neste formato para atualizar todos os dados de uma só vez."""
                 self.send_message(chat_id, mensagem, 
                                 parse_mode='Markdown',
                                 reply_markup={'inline_keyboard': inline_keyboard})
+                
+                # Iniciar monitoramento automático imediato do pagamento
+                import threading
+                import time
+                
+                def monitorar_pagamento():
+                    """Monitor automático que verifica pagamento a cada 10 segundos"""
+                    payment_id = resultado.get('payment_id')
+                    logger.info(f"🔄 Iniciando monitoramento automático do pagamento {payment_id}")
+                    
+                    for tentativa in range(30):  # 30 tentativas = 5 minutos
+                        try:
+                            time.sleep(10)  # Aguardar 10 segundos
+                            status = self.mercado_pago.verificar_pagamento(payment_id)
+                            
+                            logger.info(f"🔍 Verificação {tentativa+1}/30: Status = {status.get('status')}")
+                            
+                            if status.get('success') and status.get('status') == 'approved':
+                                logger.info(f"🎉 PAGAMENTO APROVADO! Liberando acesso para {chat_id}")
+                                self.liberar_acesso_imediato(chat_id, payment_id)
+                                return
+                                
+                        except Exception as e:
+                            logger.error(f"Erro na verificação automática {tentativa+1}: {e}")
+                    
+                    logger.warning(f"⏰ Timeout no monitoramento do pagamento {payment_id}")
+                
+                # Iniciar thread de monitoramento
+                thread = threading.Thread(target=monitorar_pagamento, daemon=True)
+                thread.start()
             else:
                 self.send_message(chat_id, 
                     f"❌ Erro ao gerar PIX: {resultado.get('message', 'Erro desconhecido')}\n\n"
-                    "Tente novamente ou entre em contato com o suporte.")
+                    "Tente novamente mais tarde ou entre em contato com o suporte.",
+                    reply_markup=self.criar_teclado_usuario())
             
         except Exception as e:
-            logger.error(f"Erro ao processar renovação: {e}")
-            self.send_message(chat_id, "❌ Erro ao processar renovação.")
+            logger.error(f"💥 ERRO CRÍTICO na renovação do usuário {chat_id}: {e}")
+            import traceback
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            self.send_message(chat_id, 
+                f"❌ ERRO CRÍTICO ao processar seu pagamento.\n\n"
+                f"Detalhes: {str(e)}\n\n"
+                f"🚨 Entre em contato com o suporte IMEDIATAMENTE e informe o ID: {chat_id}",
+                reply_markup=self.criar_teclado_usuario())
+    
+    def mostrar_guia_usuario(self, chat_id):
+        """Exibe o guia completo do usuário dividido em seções"""
+        try:
+            mensagem = """📚 *GUIA COMPLETO DO USUÁRIO*
+
+🎯 **Bem-vindo ao sistema de gestão de clientes!**
+
+Este guia contém todas as informações para usar o sistema de forma eficiente.
+
+📖 **SEÇÕES DISPONÍVEIS:**"""
+
+            inline_keyboard = [
+                [
+                    {'text': '🚀 1. Primeiros Passos', 'callback_data': 'guia_primeiros_passos'},
+                    {'text': '📱 2. Conectar WhatsApp', 'callback_data': 'guia_whatsapp'}
+                ],
+                [
+                    {'text': '👥 3. Gerenciar Clientes', 'callback_data': 'guia_clientes'},
+                    {'text': '📄 4. Templates de Mensagens', 'callback_data': 'guia_templates'}
+                ],
+                [
+                    {'text': '📤 5. Enviar Mensagens', 'callback_data': 'guia_envios'},
+                    {'text': '⏰ 6. Configurar Automação', 'callback_data': 'guia_automacao'}
+                ],
+                [
+                    {'text': '📊 7. Relatórios', 'callback_data': 'guia_relatorios'},
+                    {'text': '🔧 8. Solução de Problemas', 'callback_data': 'guia_problemas'}
+                ],
+                [
+                    {'text': '💡 9. Dicas e Práticas', 'callback_data': 'guia_dicas'}
+                ],
+                [
+                    {'text': '🔙 Configurações', 'callback_data': 'configuracoes_menu'}
+                ]
+            ]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+                            
+        except Exception as e:
+            logger.error(f"Erro ao mostrar guia do usuário: {e}")
+            self.send_message(chat_id, "❌ Erro ao carregar guia do usuário.")
+    
+    def mostrar_guia_primeiros_passos(self, chat_id):
+        """Seção: Primeiros Passos"""
+        mensagem = """🚀 **PRIMEIROS PASSOS**
+
+**📋 Para começar a usar o sistema:**
+
+**1️⃣ CONECTE O WHATSAPP**
+• Vá em 📱 WhatsApp → Configurar
+• Escaneie o QR Code com seu celular
+• Aguarde confirmação de conexão
+
+**2️⃣ CRIE TEMPLATES**
+• Acesse ⚙️ Configurações → Templates
+• Crie template de "cobrança" (obrigatório)
+• Use variáveis: {nome}, {valor}, {vencimento}
+
+**3️⃣ CONFIGURE AUTOMAÇÃO**
+• Vá em ⚙️ Configurações → Agendador
+• Defina horário de verificação (ex: 09:00)
+• Ative envios automáticos
+
+**4️⃣ CADASTRE CLIENTES**
+• Use 👥 Gestão de Clientes → Cadastrar
+• Preencha: nome, telefone, vencimento, valor
+• Defina se recebe mensagens automáticas
+
+**✅ PRONTO! Sistema configurado!**
+
+**🎯 PRÓXIMO:** Conectar WhatsApp"""
+
+        inline_keyboard = [
+            [{'text': '📱 Conectar WhatsApp', 'callback_data': 'guia_whatsapp'}],
+            [{'text': '🔙 Guia Principal', 'callback_data': 'guia_usuario'}]
+        ]
+        
+        self.send_message(chat_id, mensagem, 
+                        parse_mode='Markdown',
+                        reply_markup={'inline_keyboard': inline_keyboard})
+    
+    def mostrar_guia_whatsapp(self, chat_id):
+        """Seção: Conectar WhatsApp"""
+        mensagem = """📱 **CONECTAR WHATSAPP**
+
+**🔌 PASSO A PASSO:**
+
+**1️⃣ Acessar Configuração**
+• Menu principal → 📱 WhatsApp
+• Clique em "📱 Configurar WhatsApp"
+
+**2️⃣ Gerar QR Code**
+• Sistema gerará QR Code automaticamente
+• Código fica válido por alguns minutos
+
+**3️⃣ Escanear no Celular**
+• Abra WhatsApp no seu celular
+• Menu (3 pontos) → Dispositivos conectados
+• "Conectar um dispositivo"
+• Aponte câmera para o QR Code
+
+**4️⃣ Confirmar Conexão**
+• Aguarde: "✅ WhatsApp conectado!"
+• Status mudará para "🟢 Conectado"
+
+**⚠️ IMPORTANTES:**
+• Celular deve estar com internet
+• Não desconecte pelo WhatsApp Web
+• Se desconectar, repita o processo
+• Mantenha WhatsApp sempre ativo
+
+**🔧 Se não funcionar:**
+• Gere novo QR Code
+• Verifique internet do celular
+• Reinicie o WhatsApp no celular"""
+
+        inline_keyboard = [
+            [{'text': '👥 Gerenciar Clientes', 'callback_data': 'guia_clientes'}],
+            [{'text': '🔙 Guia Principal', 'callback_data': 'guia_usuario'}]
+        ]
+        
+        self.send_message(chat_id, mensagem, 
+                        parse_mode='Markdown',
+                        reply_markup={'inline_keyboard': inline_keyboard})
+    
+    def mostrar_guia_clientes(self, chat_id):
+        """Seção: Gerenciar Clientes"""
+        mensagem = """👥 **GERENCIAR CLIENTES**
+
+**➕ CADASTRAR NOVO CLIENTE:**
+
+**1️⃣ Acessar Cadastro**
+• 👥 Gestão de Clientes → ➕ Cadastrar
+
+**2️⃣ Preencher Dados** (em ordem):
+• **Nome:** Nome completo do cliente
+• **Telefone:** Apenas números (11987654321)
+• **Vencimento:** dd/mm/aaaa (01/12/2024)
+• **Valor:** Use ponto (50.00)
+• **Plano:** Nome do serviço (Premium, Básico)
+
+**3️⃣ Configurações:**
+• **Mensagens automáticas:** Sim/Não
+• **Observações:** Informações extras
+
+**📋 GERENCIAR EXISTENTES:**
+
+**🔍 Buscar:** Digite nome ou telefone
+**📋 Listar:** Ver todos com status:
+• 🟢 Em dia (vencimento futuro)
+• 🟡 Vence hoje
+• 🔴 Vencido (precisa pagamento)
+
+**✏️ AÇÕES DISPONÍVEIS:**
+• **💬 Enviar mensagem:** Manual
+• **✏️ Editar:** Alterar dados
+• **🔄 Renovar:** Quitar e definir novo vencimento
+• **❌ Inativar:** Parar envios
+
+**💡 DICAS:**
+• Telefone: DDD + 8 dígitos (padrão Baileys)
+• Sistema converte automaticamente 9 dígitos
+• Cada cliente tem ID único
+• Mesmo telefone pode ter vários clientes"""
+
+        inline_keyboard = [
+            [{'text': '📄 Templates', 'callback_data': 'guia_templates'}],
+            [{'text': '🔙 Guia Principal', 'callback_data': 'guia_usuario'}]
+        ]
+        
+        self.send_message(chat_id, mensagem, 
+                        parse_mode='Markdown',
+                        reply_markup={'inline_keyboard': inline_keyboard})
+    
+    def mostrar_guia_templates(self, chat_id):
+        """Seção: Templates de Mensagens"""
+        mensagem = """📄 **TEMPLATES DE MENSAGENS**
+
+**📝 CRIAR TEMPLATE:**
+
+**1️⃣ Acessar Templates**
+• ⚙️ Configurações → 📄 Templates
+• ➕ Criar Template
+
+**2️⃣ Tipos de Templates:**
+
+**🔴 COBRANÇA** (obrigatório)
+• Enviado 1 dia após vencimento
+• Use para cobranças automáticas
+
+**💰 RENOVAÇÃO**
+• Para envios manuais
+• Lembrete de renovação
+
+**⚠️ AVISO**
+• Informações gerais
+• Avisos importantes
+
+**3️⃣ Variáveis Disponíveis:**
+• **{nome}** → Nome do cliente
+• **{telefone}** → Telefone
+• **{vencimento}** → Data vencimento
+• **{valor}** → Valor mensal
+• **{plano}** → Nome do plano
+
+**📝 EXEMPLO DE TEMPLATE:**
+```
+🔔 Olá {nome}!
+
+Seu plano venceu ontem ({vencimento}).
+Para manter ativo, pague R$ {valor}.
+
+PIX: sua-chave@email.com
+Valor: R$ {valor}
+
+Dúvidas? Responda esta mensagem!
+```
+
+**✅ BOAS PRÁTICAS:**
+• Use linguagem amigável
+• Inclua forma de pagamento
+• Ofereça canal de suporte
+• Seja claro sobre valores
+• Evite textos muito longos"""
+
+        inline_keyboard = [
+            [{'text': '📤 Enviar Mensagens', 'callback_data': 'guia_envios'}],
+            [{'text': '🔙 Guia Principal', 'callback_data': 'guia_usuario'}]
+        ]
+        
+        self.send_message(chat_id, mensagem, 
+                        parse_mode='Markdown',
+                        reply_markup={'inline_keyboard': inline_keyboard})
+    
+    def mostrar_guia_envios(self, chat_id):
+        """Seção: Enviar Mensagens"""
+        mensagem = """📤 **ENVIAR MENSAGENS**
+
+**💬 ENVIO MANUAL:**
+
+**1️⃣ Selecionar Cliente**
+• 👥 Gestão → 📋 Listar Clientes
+• Clique no 💬 ao lado do cliente
+
+**2️⃣ Escolher Template**
+• Lista de templates aparece
+• Ou "✏️ Mensagem Personalizada"
+
+**3️⃣ Revisar Mensagem**
+• Preview com dados do cliente
+• Variáveis já substituídas
+• Confira se está correto
+
+**4️⃣ Enviar**
+• 📤 Enviar Agora
+• Aguarde confirmação
+• Registrado no histórico
+
+**⚡ ENVIO AUTOMÁTICO:**
+
+**🤖 REGRAS DO SISTEMA:**
+• Verifica vencimentos diariamente
+• Envia apenas 1 dia após vencimento
+• Só para quem aceita mensagens automáticas
+• Uma mensagem por dia por cliente
+• No horário configurado (ex: 9h)
+
+**⚙️ CONFIGURAR AUTOMAÇÃO:**
+• ⚙️ Configurações → ⏰ Agendador
+• Definir horário de verificação
+• Ativar "Envios automáticos"
+• Escolher template padrão
+
+**📊 ACOMPANHAR ENVIOS:**
+• 📊 Relatórios → Histórico de envios
+• Status: Enviado/Falhou/Pendente
+• Horário e template usado"""
+
+        inline_keyboard = [
+            [{'text': '⏰ Automação', 'callback_data': 'guia_automacao'}],
+            [{'text': '🔙 Guia Principal', 'callback_data': 'guia_usuario'}]
+        ]
+        
+        self.send_message(chat_id, mensagem, 
+                        parse_mode='Markdown',
+                        reply_markup={'inline_keyboard': inline_keyboard})
+    
+    def mostrar_guia_automacao(self, chat_id):
+        """Seção: Configurar Automação"""
+        mensagem = """⏰ **CONFIGURAR AUTOMAÇÃO**
+
+**🤖 FUNCIONAMENTO:**
+• Sistema verifica vencimentos diariamente
+• Envia apenas 1 dia após vencimento
+• Só para quem aceita mensagens automáticas
+
+**⚙️ CONFIGURAR:**
+• ⚙️ Configurações → ⏰ Agendador
+• Definir horário (recomendado: 09:00)
+• Ativar "Envios automáticos"
+
+**💡 REGRAS:**
+• WhatsApp deve estar conectado
+• Template "cobrança" deve existir"""
+
+        inline_keyboard = [
+            [{'text': '📊 Relatórios', 'callback_data': 'guia_relatorios'}],
+            [{'text': '🔙 Guia Principal', 'callback_data': 'guia_usuario'}]
+        ]
+        
+        self.send_message(chat_id, mensagem, parse_mode='Markdown', reply_markup={'inline_keyboard': inline_keyboard})
+    
+    def mostrar_guia_relatorios(self, chat_id):
+        """Seção: Relatórios"""
+        mensagem = """📊 **RELATÓRIOS**
+
+**📈 TIPOS:**
+• **Rápido:** Resumo de status
+• **Completo:** Análise detalhada
+• **Por Período:** 7/30/90 dias
+
+**💰 INFORMAÇÕES:**
+• Receita esperada vs recebida
+• Clientes por status
+• Histórico de mensagens"""
+
+        inline_keyboard = [
+            [{'text': '🔧 Problemas', 'callback_data': 'guia_problemas'}],
+            [{'text': '🔙 Guia Principal', 'callback_data': 'guia_usuario'}]
+        ]
+        
+        self.send_message(chat_id, mensagem, parse_mode='Markdown', reply_markup={'inline_keyboard': inline_keyboard})
+    
+    def mostrar_guia_problemas(self, chat_id):
+        """Seção: Solução de Problemas"""
+        mensagem = """🔧 **PROBLEMAS COMUNS**
+
+**❌ WhatsApp desconectado:**
+• 📱 WhatsApp → Gerar novo QR
+
+**📱 Cliente não recebe:**
+• Verificar telefone (DDD + 8 dígitos)
+• Confirmar WhatsApp conectado
+
+**🤖 Automação não funciona:**
+• Ativar agendador
+• Criar template "cobrança"
+
+**💻 Erro ao cadastrar:**
+• Telefone: apenas números
+• Data: dd/mm/aaaa
+• Valor: usar ponto (50.00)"""
+
+        inline_keyboard = [
+            [{'text': '💡 Dicas', 'callback_data': 'guia_dicas'}],
+            [{'text': '🔙 Guia Principal', 'callback_data': 'guia_usuario'}]
+        ]
+        
+        self.send_message(chat_id, mensagem, parse_mode='Markdown', reply_markup={'inline_keyboard': inline_keyboard})
+    
+    def mostrar_guia_dicas(self, chat_id):
+        """Seção: Dicas"""
+        mensagem = """💡 **DICAS IMPORTANTES**
+
+**✅ Templates:**
+• Use linguagem amigável
+• Inclua {nome} para personalizar
+• Deixe claro valor e pagamento
+
+**👥 Clientes:**
+• Mantenha dados atualizados
+• Use observações importantes
+
+**🤖 Automação:**
+• Teste antes de ativar
+• WhatsApp sempre conectado
+
+**💰 Cobrança:**
+• Apenas 1 dia após vencimento
+• Facilite pagamento"""
+
+        inline_keyboard = [
+            [{'text': '🚀 Primeiros Passos', 'callback_data': 'guia_primeiros_passos'}],
+            [{'text': '🔙 Guia Principal', 'callback_data': 'guia_usuario'}]
+        ]
+        
+        self.send_message(chat_id, mensagem, parse_mode='Markdown', reply_markup={'inline_keyboard': inline_keyboard})
+
+    def liberar_acesso_imediato(self, chat_id, payment_id):
+        """Libera acesso imediatamente após confirmação de pagamento"""
+        try:
+            logger.info(f"🚀 Liberando acesso imediato para usuário {chat_id}")
+            
+            # Ativar plano do usuário
+            if self.user_manager:
+                resultado = self.user_manager.ativar_plano(chat_id, payment_id)
+                
+                if resultado.get('success'):
+                    # Notificar usuário do sucesso
+                    mensagem = """🎉 *PAGAMENTO CONFIRMADO!*
+
+✅ **ACESSO LIBERADO COM SUCESSO!**
+📅 Plano ativado por 30 dias
+🚀 Todas as funcionalidades disponíveis
+
+🎯 **VOCÊ PODE COMEÇAR AGORA:**
+• Cadastrar seus clientes
+• Configurar mensagens automáticas  
+• Gerar relatórios detalhados
+• Configurar WhatsApp
+
+💼 Use o menu abaixo para gerenciar seus clientes!"""
+                    
+                    keyboard = self.criar_teclado_usuario()
+                    self.send_message(chat_id, mensagem, 
+                                    parse_mode='Markdown',
+                                    reply_markup=keyboard)
+                    
+                    # Obter dados do usuário para notificação admin
+                    usuario = self.user_manager.obter_usuario(chat_id)
+                    nome_usuario = usuario.get('nome', 'Usuário') if usuario else 'Usuário'
+                    email_usuario = usuario.get('email', 'N/A') if usuario else 'N/A'
+                    
+                    # Notificar admin sobre o pagamento
+                    admin_id = 1460561546  # ID do admin principal
+                    admin_msg = f"""💰 *NOVO PAGAMENTO PROCESSADO!*
+
+👤 **Nome:** {nome_usuario}
+📞 **Chat ID:** {chat_id}
+📧 **Email:** {email_usuario}
+💳 **Payment ID:** {payment_id}  
+💰 **Valor:** R$ 20,00
+⏰ **Data/Hora:** {datetime.now().strftime('%d/%m/%Y às %H:%M')}
+
+✅ **Status:** Acesso liberado automaticamente"""
+                    
+                    self.send_message(admin_id, admin_msg, parse_mode='Markdown')
+                    logger.info(f"📨 Notificação enviada ao admin sobre pagamento de {nome_usuario}")
+                    
+                    logger.info(f"✅ Acesso liberado com sucesso para {chat_id}")
+                    return True
+                else:
+                    logger.error(f"❌ Erro ao ativar plano para {chat_id}: {resultado.get('message')}")
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Erro ao liberar acesso imediato: {e}")
+            return False
+    
+    def processar_renovacao(self, chat_id):
+        """Método legado - redireciona para processar_renovacao_direto"""
+        logger.info(f"↗️ Redirecionando renovação legada para método direto - usuário {chat_id}")
+        self.processar_renovacao_direto(chat_id)
     
     def verificar_pagamento(self, chat_id, payment_id):
         """Verifica status de pagamento PIX"""
@@ -5758,6 +7020,9 @@ Envie exatamente neste formato para atualizar todos os dados de uma só vez."""
                             
                             self.send_message(chat_id, mensagem, parse_mode='Markdown')
                             
+                            # Notificar admin sobre pagamento recebido
+                            self.notificar_admin_pagamento(chat_id, payment_id, status)
+                            
                             # Enviar menu principal após 2 segundos
                             import time
                             time.sleep(2)
@@ -5782,6 +7047,48 @@ Envie exatamente neste formato para atualizar todos os dados de uma só vez."""
         except Exception as e:
             logger.error(f"Erro ao verificar pagamento: {e}")
             self.send_message(chat_id, "❌ Erro ao verificar pagamento.")
+    
+    def notificar_admin_pagamento(self, user_chat_id, payment_id, status_info):
+        """Notifica admin quando um pagamento é recebido"""
+        try:
+            if not hasattr(self, 'admin_chat_id') or not self.admin_chat_id:
+                return
+            
+            # Obter dados do usuário
+            usuario = None
+            if self.user_manager:
+                usuario = self.user_manager.obter_usuario(user_chat_id)
+            
+            nome = usuario.get('nome', 'Usuário Desconhecido') if usuario else 'Usuário Desconhecido'
+            email = usuario.get('email', 'N/A') if usuario else 'N/A'
+            
+            mensagem = f"""💳 *PAGAMENTO RECEBIDO!*
+
+👤 **Dados do Cliente:**
+• Nome: {nome}
+• Chat ID: {user_chat_id}
+• Email: {email}
+
+💰 **Dados do Pagamento:**
+• ID: {payment_id}
+• Valor: R$ 20,00
+• Status: {status_info.get('status', 'approved')}
+• Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}
+
+✅ **Ação Executada:**
+• Plano ativado automaticamente
+• Usuário notificado
+• Acesso liberado por 30 dias
+
+🎯 **Próximas Ações Sugeridas:**
+• Acompanhar onboarding do usuário
+• Verificar primeiro acesso ao sistema"""
+
+            self.send_message(self.admin_chat_id, mensagem, parse_mode='Markdown')
+            logger.info(f"Admin notificado sobre pagamento: {payment_id} do usuário {user_chat_id}")
+            
+        except Exception as e:
+            logger.error(f"Erro ao notificar admin sobre pagamento: {e}")
     
     def relatorios_usuario(self, chat_id):
         """Menu de relatórios para usuários não-admin"""
@@ -6066,31 +7373,9 @@ Status: {baileys_status.title()}
 
 🔧 *Escolha uma opção para configurar:*"""
             
-            inline_keyboard = [
-                [
-                    {'text': '🏢 Dados da Empresa', 'callback_data': 'config_empresa'},
-                    {'text': '💳 Configurar PIX', 'callback_data': 'config_pix'}
-                ],
-                [
-                    {'text': '📱 Status WhatsApp', 'callback_data': 'config_baileys_status'},
-                    {'text': '📝 Templates', 'callback_data': 'templates_menu'}
-                ],
-                [
-                    {'text': '⏰ Agendador', 'callback_data': 'agendador_menu'},
-                    {'text': '⚙️ Horários', 'callback_data': 'config_horarios'}
-                ],
-                [
-                    {'text': '🔔 Notificações', 'callback_data': 'config_notificacoes'},
-                    {'text': '📊 Sistema', 'callback_data': 'config_sistema'}
-                ],
-                [
-                    {'text': '🔙 Menu Principal', 'callback_data': 'menu_principal'}
-                ]
-            ]
-            
             self.send_message(chat_id, mensagem, 
                             parse_mode='Markdown',
-                            reply_markup={'inline_keyboard': inline_keyboard})
+                            reply_markup=self.criar_teclado_configuracoes())
         
         except Exception as e:
             logger.error(f"Erro ao mostrar menu de configurações: {e}")
@@ -6297,9 +7582,9 @@ Digite o novo valor:"""
                 self.send_message(chat_id, "❌ Valor muito curto. Digite um valor válido:")
                 return
             
-            # Salvar configuração
+            # Salvar configuração com isolamento por usuário
             if self.db:
-                self.db.salvar_configuracao(config_key, texto.strip())
+                self.db.salvar_configuracao(config_key, texto.strip(), chat_id_usuario=chat_id)
                 
                 # Limpar estado de conversa
                 if chat_id in self.conversation_states:
@@ -7922,7 +9207,7 @@ Para adicionar o primeiro usuário, use o comando "Cadastrar Usuário"."""
             }
             
             self.send_message(chat_id,
-                "📝 **CADASTRAR USUÁRIO MANUALMENTE**\n\n"
+                "📝 *CADASTRAR USUÁRIO MANUALMENTE*\n\n"
                 "Digite o chat_id do usuário (ID do Telegram):",
                 parse_mode='Markdown',
                 reply_markup=self.criar_teclado_cancelar())
@@ -8097,6 +9382,569 @@ Para adicionar o primeiro usuário, use o comando "Cadastrar Usuário"."""
         except Exception as e:
             logger.error(f"Erro ao gerar relatório completo: {e}")
             self.send_message(chat_id, "❌ Erro ao gerar relatório completo.")
+    
+    def listar_pagamentos_pendentes_admin(self, chat_id):
+        """Lista pagamentos pendentes (admin only)"""
+        try:
+            if not self.is_admin(chat_id):
+                self.send_message(chat_id, "❌ Acesso negado.")
+                return
+            
+            if not self.user_manager:
+                self.send_message(chat_id, "❌ Sistema de usuários não disponível.")
+                return
+            
+            # Buscar pagamentos pendentes
+            pendentes = self.user_manager.listar_usuarios_por_status('teste_expirado')
+            vencidos = self.user_manager.listar_usuarios_por_status('plano_vencido')
+            
+            todos_pendentes = pendentes + vencidos
+            
+            if not todos_pendentes:
+                mensagem = """⏳ *PAGAMENTOS PENDENTES*
+                
+✅ **Nenhum pagamento pendente no momento!**
+
+Todos os usuários estão com suas assinaturas em dia."""
+            else:
+                mensagem = f"""⏳ *PAGAMENTOS PENDENTES*
+                
+📊 **Total:** {len(todos_pendentes)} usuário(s)
+⚠️ **Teste expirado:** {len(pendentes)}
+❌ **Plano vencido:** {len(vencidos)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━"""
+                
+                for usuario in todos_pendentes[:10]:
+                    nome = usuario.get('nome', 'Sem nome')
+                    email = usuario.get('email', 'Sem email')
+                    status = usuario.get('status', 'N/A')
+                    vencimento = usuario.get('proximo_vencimento', 'N/A')
+                    
+                    status_emoji = {'teste_expirado': '⚠️', 'plano_vencido': '❌'}.get(status, '❓')
+                    
+                    mensagem += f"""
+                    
+{status_emoji} **{nome}**
+📧 {email}
+📅 Vencimento: {vencimento}
+📊 Status: {status.replace('_', ' ').title()}
+━━━━━━━━━━━━━━━━━━━━━━━━"""
+                
+                if len(todos_pendentes) > 10:
+                    mensagem += f"\n\n... e mais {len(todos_pendentes) - 10} usuários"
+            
+            inline_keyboard = [
+                [
+                    {'text': '🔄 Atualizar', 'callback_data': 'pagamentos_pendentes'},
+                    {'text': '📧 Enviar Cobrança', 'callback_data': 'enviar_cobranca_geral'}
+                ],
+                [
+                    {'text': '🔙 Menu Faturamento', 'callback_data': 'faturamento_menu'},
+                    {'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}
+                ]
+            ]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+                            
+        except Exception as e:
+            logger.error(f"Erro ao listar pagamentos pendentes: {e}")
+            self.send_message(chat_id, "❌ Erro ao carregar pagamentos pendentes.")
+    
+    def transacoes_recentes_admin(self, chat_id):
+        """Mostra transações recentes (admin only)"""
+        try:
+            if not self.is_admin(chat_id):
+                self.send_message(chat_id, "❌ Acesso negado.")
+                return
+            
+            if not self.user_manager:
+                self.send_message(chat_id, "❌ Sistema de usuários não disponível.")
+                return
+            
+            # Buscar transações do Mercado Pago diretamente
+            from datetime import datetime, timedelta
+            import json
+            
+            try:
+                # Buscar pagamentos dos últimos 30 dias diretamente do banco
+                with self.db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT u.nome, u.email, p.valor, p.status, p.data_criacao, p.data_pagamento 
+                        FROM pagamentos p 
+                        JOIN usuarios u ON p.usuario_id = u.id 
+                        WHERE p.data_criacao >= %s 
+                        ORDER BY p.data_criacao DESC 
+                        LIMIT 50
+                    """, (datetime.now() - timedelta(days=30),))
+                    
+                    transacoes = cursor.fetchall()
+            except:
+                transacoes = []
+            
+            if not transacoes:
+                mensagem = """💳 *TRANSAÇÕES RECENTES*
+                
+✅ **Nenhuma transação encontrada nos últimos 30 dias.**
+
+O sistema está funcionando, mas ainda não há registros de pagamentos recentes."""
+            else:
+                total_valor = sum(float(t.get('valor', 0)) for t in transacoes)
+                
+                mensagem = f"""💳 *TRANSAÇÕES RECENTES*
+                
+📊 **Últimos 30 dias:** {len(transacoes)} transações
+💰 **Total processado:** R$ {total_valor:.2f}
+
+━━━━━━━━━━━━━━━━━━━━━━━━"""
+                
+                for transacao in transacoes[:10]:
+                    nome = transacao.get('usuario_nome', 'Usuário')
+                    valor = float(transacao.get('valor', 0))
+                    status = transacao.get('status', 'desconhecido')
+                    data = transacao.get('data_pagamento', 'N/A')
+                    
+                    status_emoji = {'approved': '✅', 'pending': '⏳', 'rejected': '❌'}.get(status, '❓')
+                    
+                    mensagem += f"""
+                    
+{status_emoji} **{nome}**
+💰 R$ {valor:.2f} - {status.title()}
+📅 {data}
+━━━━━━━━━━━━━━━━━━━━━━━━"""
+                
+                if len(transacoes) > 10:
+                    mensagem += f"\n\n... e mais {len(transacoes) - 10} transações"
+            
+            inline_keyboard = [
+                [
+                    {'text': '🔄 Atualizar', 'callback_data': 'transacoes_recentes'},
+                    {'text': '📊 Relatório Completo', 'callback_data': 'relatorio_transacoes'}
+                ],
+                [
+                    {'text': '🔙 Menu Faturamento', 'callback_data': 'faturamento_menu'},
+                    {'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}
+                ]
+            ]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+                            
+        except Exception as e:
+            logger.error(f"Erro ao obter transações recentes: {e}")
+            self.send_message(chat_id, "❌ Erro ao carregar transações.")
+    
+    def processar_cadastro_usuario_admin(self, chat_id, text, user_state):
+        """Processa cadastro manual de usuário pelo admin"""
+        try:
+            step = user_state.get('step')
+            dados = user_state.get('dados', {})
+            
+            if step == 'chat_id':
+                try:
+                    target_chat_id = int(text.strip())
+                    dados['chat_id'] = target_chat_id
+                    user_state['step'] = 'nome'
+                    
+                    self.send_message(chat_id,
+                        f"✅ Chat ID: {target_chat_id}\n\n"
+                        "👤 Digite o nome do usuário:",
+                        reply_markup=self.criar_teclado_cancelar())
+                        
+                except ValueError:
+                    self.send_message(chat_id,
+                        "❌ Chat ID inválido. Digite apenas números:",
+                        reply_markup=self.criar_teclado_cancelar())
+                    
+            elif step == 'nome':
+                nome = text.strip()
+                if len(nome) < 2:
+                    self.send_message(chat_id,
+                        "❌ Nome muito curto. Digite um nome válido:",
+                        reply_markup=self.criar_teclado_cancelar())
+                    return
+                    
+                dados['nome'] = nome
+                user_state['step'] = 'email'
+                
+                self.send_message(chat_id,
+                    f"✅ Nome: {nome}\n\n"
+                    "📧 Digite o email do usuário:",
+                    reply_markup=self.criar_teclado_cancelar())
+                    
+            elif step == 'email':
+                email = text.strip()
+                if '@' not in email or len(email) < 5:
+                    self.send_message(chat_id,
+                        "❌ Email inválido. Digite um email válido:",
+                        reply_markup=self.criar_teclado_cancelar())
+                    return
+                    
+                dados['email'] = email
+                
+                # Cadastrar usuário
+                if self.user_manager:
+                    resultado = self.user_manager.cadastrar_usuario_manual(
+                        dados['chat_id'], dados['nome'], dados['email']
+                    )
+                    
+                    if resultado['success']:
+                        self.send_message(chat_id,
+                            f"✅ **USUÁRIO CADASTRADO COM SUCESSO!**\n\n"
+                            f"👤 Nome: {dados['nome']}\n"
+                            f"📧 Email: {dados['email']}\n"
+                            f"🆔 Chat ID: {dados['chat_id']}\n"
+                            f"📅 Status: Teste Gratuito (7 dias)\n\n"
+                            f"O usuário pode usar /start para começar.",
+                            parse_mode='Markdown')
+                    else:
+                        self.send_message(chat_id,
+                            f"❌ Erro ao cadastrar usuário: {resultado['message']}")
+                else:
+                    self.send_message(chat_id, "❌ Sistema de usuários não disponível.")
+                
+                # Limpar estado
+                del self.conversation_states[chat_id]
+                
+        except Exception as e:
+            logger.error(f"Erro ao processar cadastro de usuário: {e}")
+            self.send_message(chat_id, "❌ Erro ao cadastrar usuário.")
+            del self.conversation_states[chat_id]
+    
+    def processar_busca_usuario_admin(self, chat_id, text, user_state):
+        """Processa busca de usuário pelo admin"""
+        try:
+            step = user_state.get('step')
+            
+            if step == 'termo':
+                termo = text.strip()
+                if len(termo) < 2:
+                    self.send_message(chat_id,
+                        "❌ Termo muito curto. Digite pelo menos 2 caracteres:",
+                        reply_markup=self.criar_teclado_cancelar())
+                    return
+                
+                if self.user_manager:
+                    resultados = self.user_manager.buscar_usuarios(termo)
+                    
+                    if not resultados:
+                        self.send_message(chat_id,
+                            f"🔍 **BUSCA: '{termo}'**\n\n"
+                            "❌ Nenhum usuário encontrado.")
+                    else:
+                        mensagem = f"🔍 **BUSCA: '{termo}'**\n\n"
+                        mensagem += f"📋 **{len(resultados)} usuário(s) encontrado(s):**\n\n"
+                        
+                        for i, usuario in enumerate(resultados[:10], 1):
+                            nome = usuario.get('nome', 'Sem nome')
+                            email = usuario.get('email', 'Sem email')
+                            status = usuario.get('status', 'N/A')
+                            chat_id_usr = usuario.get('chat_id', 'N/A')
+                            
+                            mensagem += f"{i}. **{nome}**\n"
+                            mensagem += f"📧 {email}\n"
+                            mensagem += f"🆔 {chat_id_usr}\n"
+                            mensagem += f"📊 {status.title()}\n\n"
+                        
+                        if len(resultados) > 10:
+                            mensagem += f"... e mais {len(resultados) - 10} usuários"
+                        
+                        self.send_message(chat_id, mensagem, parse_mode='Markdown')
+                else:
+                    self.send_message(chat_id, "❌ Sistema de usuários não disponível.")
+                
+                # Limpar estado
+                del self.conversation_states[chat_id]
+                
+        except Exception as e:
+            logger.error(f"Erro ao processar busca de usuário: {e}")
+            self.send_message(chat_id, "❌ Erro ao buscar usuário.")
+            del self.conversation_states[chat_id]
+    
+    def estatisticas_detalhadas_admin(self, chat_id):
+        """Mostra estatísticas detalhadas do sistema (admin only)"""
+        try:
+            if not self.is_admin(chat_id):
+                self.send_message(chat_id, "❌ Acesso negado.")
+                return
+            
+            if not self.user_manager:
+                self.send_message(chat_id, "❌ Sistema de usuários não disponível.")
+                return
+            
+            # Obter estatísticas completas
+            stats_usuarios = self.user_manager.obter_estatisticas()
+            stats_faturamento = self.user_manager.obter_estatisticas_faturamento()
+            
+            mensagem = f"""📊 *ESTATÍSTICAS DETALHADAS DO SISTEMA*
+
+👥 **USUÁRIOS:**
+• Total cadastrado: {stats_usuarios.get('total_usuarios', 0)}
+• Planos ativos: {stats_usuarios.get('usuarios_ativos', 0)}
+• Em teste gratuito: {stats_usuarios.get('usuarios_teste', 0)}
+• Taxa de conversão: {(stats_usuarios.get('usuarios_ativos', 0) / max(1, stats_usuarios.get('total_usuarios', 1)) * 100):.1f}%
+
+💰 **FATURAMENTO:**
+• Receita mensal atual: R$ {stats_faturamento.get('faturamento_mensal', 0):.2f}
+• Potencial de conversão: R$ {stats_faturamento.get('projecao_conversao', 0):.2f}
+• Potencial total: R$ {stats_faturamento.get('potencial_crescimento', 0):.2f}
+
+📈 **CRESCIMENTO:**
+• Usuários que podem converter: {stats_faturamento.get('usuarios_teste', 0)}
+• Receita potencial adicional: R$ {stats_faturamento.get('projecao_conversao', 0):.2f}
+• Taxa estimada de conversão: 30%
+
+🎯 **METAS:**
+• Próxima meta: R$ {(stats_faturamento.get('faturamento_mensal', 0) * 1.2):.2f}/mês (+20%)
+• Usuários necessários: {int((stats_faturamento.get('faturamento_mensal', 0) * 1.2) / 20)} ativos
+• Crescimento necessário: {max(0, int((stats_faturamento.get('faturamento_mensal', 0) * 1.2) / 20) - stats_usuarios.get('usuarios_ativos', 0))} novos usuários"""
+
+            # Histórico de pagamentos
+            historico = stats_faturamento.get('historico', [])
+            if historico:
+                mensagem += "\n\n📅 **HISTÓRICO RECENTE:**"
+                for h in historico[:3]:
+                    mes = int(h.get('mes', 0))
+                    ano = int(h.get('ano', 0))
+                    valor = float(h.get('total_arrecadado', 0))
+                    pagamentos = int(h.get('total_pagamentos', 0))
+                    
+                    nome_mes = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun',
+                               'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'][mes-1]
+                    
+                    mensagem += f"\n• {nome_mes}/{ano}: R$ {valor:.2f} ({pagamentos} pagamentos)"
+            
+            inline_keyboard = [
+                [
+                    {'text': '🔄 Atualizar', 'callback_data': 'estatisticas_detalhadas'},
+                    {'text': '📊 Relatório Completo', 'callback_data': 'relatorio_completo'}
+                ],
+                [
+                    {'text': '👑 Gestão Usuários', 'callback_data': 'gestao_usuarios'},
+                    {'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}
+                ]
+            ]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+                            
+        except Exception as e:
+            logger.error(f"Erro ao obter estatísticas detalhadas: {e}")
+            self.send_message(chat_id, "❌ Erro ao carregar estatísticas detalhadas.")
+    
+    def enviar_cobranca_geral_admin(self, chat_id):
+        """Envia cobrança para todos os usuários pendentes (admin only)"""
+        try:
+            if not self.is_admin(chat_id):
+                self.send_message(chat_id, "❌ Acesso negado.")
+                return
+            
+            if not self.user_manager:
+                self.send_message(chat_id, "❌ Sistema de usuários não disponível.")
+                return
+            
+            # Buscar usuários com pagamentos pendentes
+            pendentes = self.user_manager.listar_usuarios_por_status('teste_expirado')
+            vencidos = self.user_manager.listar_usuarios_por_status('plano_vencido')
+            
+            todos_pendentes = pendentes + vencidos
+            
+            if not todos_pendentes:
+                self.send_message(chat_id,
+                    "✅ *COBRANÇA GERAL*\n\n"
+                    "Não há usuários com pagamentos pendentes no momento.\n\n"
+                    "Todos os usuários estão com suas assinaturas em dia.",
+                    parse_mode='Markdown')
+                return
+            
+            # Confirmar envio
+            mensagem = f"""📧 *ENVIAR COBRANÇA GERAL*
+
+🎯 **Usuários afetados:** {len(todos_pendentes)}
+⚠️ **Teste expirado:** {len(pendentes)}
+❌ **Plano vencido:** {len(vencidos)}
+
+Esta ação enviará uma mensagem de cobrança via Telegram para todos os usuários com pagamentos pendentes.
+
+⚠️ **ATENÇÃO:** Esta é uma ação em massa e não pode ser desfeita.
+
+Confirma o envio da cobrança geral?"""
+
+            inline_keyboard = [
+                [
+                    {'text': '✅ Confirmar Envio', 'callback_data': 'confirmar_cobranca_geral'},
+                    {'text': '❌ Cancelar', 'callback_data': 'pagamentos_pendentes'}
+                ],
+                [
+                    {'text': '👀 Ver Lista', 'callback_data': 'pagamentos_pendentes'},
+                    {'text': '🔙 Menu Anterior', 'callback_data': 'faturamento_menu'}
+                ]
+            ]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+                            
+        except Exception as e:
+            logger.error(f"Erro ao preparar cobrança geral: {e}")
+            self.send_message(chat_id, "❌ Erro ao preparar envio de cobrança.")
+    
+    def processar_gerar_pix_usuario(self, chat_id, user_id):
+        """Processa geração de PIX para novo usuário"""
+        try:
+            # Verificar se é o próprio usuário ou admin
+            if str(chat_id) != str(user_id) and not self.is_admin(chat_id):
+                self.send_message(chat_id, "❌ Você só pode gerar PIX para sua própria conta.")
+                return
+            
+            if not self.mercadopago:
+                self.send_message(chat_id, "❌ Sistema de pagamentos não disponível no momento.")
+                return
+            
+            # Obter dados do usuário
+            if self.user_manager:
+                usuario = self.user_manager.obter_usuario(int(user_id))
+                if not usuario:
+                    self.send_message(chat_id, "❌ Usuário não encontrado.")
+                    return
+                
+                nome_usuario = usuario.get('nome', 'Usuário')
+            else:
+                nome_usuario = 'Usuário'
+            
+            # Gerar PIX para plano mensal
+            pix_data = self.mercadopago.gerar_pix_plano_mensal(int(user_id), nome_usuario)
+            
+            if pix_data.get('success'):
+                qr_code = pix_data.get('qr_code')
+                pix_copia_cola = pix_data.get('pix_copia_cola')
+                payment_id = pix_data.get('payment_id')
+                
+                mensagem = f"""💳 *PIX GERADO COM SUCESSO!*
+
+👤 **Usuario:** {nome_usuario}
+💰 **Valor:** R$ 20,00
+📋 **Plano:** Mensal (30 dias)
+
+🔥 **PIX Copia e Cola:**
+`{pix_copia_cola}`
+
+⚡ **Instruções:**
+1. Copie o código PIX acima
+2. Cole no seu banco ou PIX
+3. Confirme o pagamento
+4. O acesso será liberado automaticamente
+
+⏰ **Válido por:** 30 minutos
+🆔 **ID:** {payment_id}"""
+
+                inline_keyboard = [
+                    [
+                        {'text': '📋 Copiar PIX', 'callback_data': f'copiar_pix_{payment_id}'},
+                        {'text': '✅ Já Paguei', 'callback_data': f'verificar_pagamento_{payment_id}'}
+                    ],
+                    [
+                        {'text': '📞 Suporte', 'url': 'https://t.me/seu_suporte'},
+                        {'text': '🔄 Novo PIX', 'callback_data': f'gerar_pix_usuario_{user_id}'}
+                    ]
+                ]
+                
+                self.send_message(int(user_id), mensagem, 
+                                parse_mode='Markdown',
+                                reply_markup={'inline_keyboard': inline_keyboard})
+                                
+                logger.info(f"PIX gerado para usuário {user_id}: {payment_id}")
+                
+            else:
+                self.send_message(chat_id, f"❌ Erro ao gerar PIX: {pix_data.get('message', 'Erro desconhecido')}")
+                
+        except Exception as e:
+            logger.error(f"Erro ao gerar PIX para usuário: {e}")
+            self.send_message(chat_id, "❌ Erro interno ao gerar PIX.")
+    
+    def processar_gerar_pix_renovacao(self, chat_id, user_id):
+        """Processa geração de PIX para renovação"""
+        try:
+            # Verificar se é o próprio usuário ou admin
+            if str(chat_id) != str(user_id) and not self.is_admin(chat_id):
+                self.send_message(chat_id, "❌ Você só pode gerar PIX para sua própria conta.")
+                return
+            
+            if not self.mercadopago:
+                self.send_message(chat_id, "❌ Sistema de pagamentos não disponível no momento.")
+                return
+            
+            # Obter dados do usuário
+            if self.user_manager:
+                usuario = self.user_manager.obter_usuario(int(user_id))
+                if not usuario:
+                    self.send_message(chat_id, "❌ Usuário não encontrado.")
+                    return
+                
+                nome_usuario = usuario.get('nome', 'Usuário')
+                status = usuario.get('status', '')
+                
+                if status != 'pago':
+                    self.send_message(chat_id, "❌ Apenas usuários com plano ativo podem renovar.")
+                    return
+                    
+            else:
+                nome_usuario = 'Usuário'
+            
+            # Gerar PIX para renovação
+            pix_data = self.mercadopago.gerar_pix_renovacao(int(user_id), nome_usuario)
+            
+            if pix_data.get('success'):
+                qr_code = pix_data.get('qr_code')
+                pix_copia_cola = pix_data.get('pix_copia_cola')
+                payment_id = pix_data.get('payment_id')
+                
+                mensagem = f"""🔄 *PIX RENOVAÇÃO GERADO!*
+
+👤 **Usuario:** {nome_usuario}
+💰 **Valor:** R$ 20,00
+📋 **Tipo:** Renovação Mensal (+30 dias)
+
+🔥 **PIX Copia e Cola:**
+`{pix_copia_cola}`
+
+⚡ **Instruções:**
+1. Copie o código PIX acima
+2. Cole no seu banco ou PIX
+3. Confirme o pagamento
+4. Seu plano será renovado automaticamente
+
+⏰ **Válido por:** 30 minutos
+🆔 **ID:** {payment_id}"""
+
+                inline_keyboard = [
+                    [
+                        {'text': '📋 Copiar PIX', 'callback_data': f'copiar_pix_{payment_id}'},
+                        {'text': '✅ Já Paguei', 'callback_data': f'verificar_pagamento_{payment_id}'}
+                    ],
+                    [
+                        {'text': '📞 Suporte', 'url': 'https://t.me/seu_suporte'},
+                        {'text': '🔄 Novo PIX', 'callback_data': f'gerar_pix_renovacao_{user_id}'}
+                    ]
+                ]
+                
+                self.send_message(int(user_id), mensagem, 
+                                parse_mode='Markdown',
+                                reply_markup={'inline_keyboard': inline_keyboard})
+                                
+                logger.info(f"PIX renovação gerado para usuário {user_id}: {payment_id}")
+                
+            else:
+                self.send_message(chat_id, f"❌ Erro ao gerar PIX: {pix_data.get('message', 'Erro desconhecido')}")
+                
+        except Exception as e:
+            logger.error(f"Erro ao gerar PIX para renovação: {e}")
+            self.send_message(chat_id, "❌ Erro interno ao gerar PIX.")
     
     def mostrar_opcoes_cliente_fila(self, chat_id, mensagem_id, cliente_id):
         """Mostra opções para cliente específico na fila (cancelar/envio imediato)"""

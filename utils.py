@@ -141,8 +141,134 @@ def formatar_moeda(valor: Union[float, int, str]) -> str:
     except (ValueError, TypeError):
         return "R$ 0,00"
 
+def houve_conversao_telefone(telefone_original: str, telefone_padronizado: str) -> bool:
+    """
+    Verifica se houve conversão no telefone (formato original diferente do padronizado)
+    """
+    if not telefone_original or not telefone_padronizado:
+        return False
+    
+    # Limpar formato original para comparação
+    original_limpo = re.sub(r'\D', '', str(telefone_original))
+    
+    # Remover código do país se presente no original
+    if original_limpo.startswith('55') and len(original_limpo) >= 12:
+        original_limpo = original_limpo[2:]
+    
+    # Remover 0 à esquerda do DDD se presente
+    if original_limpo.startswith('0') and len(original_limpo) == 11:
+        original_limpo = original_limpo[1:]
+    
+    return original_limpo != telefone_padronizado
+
+def padronizar_telefone(telefone: str) -> str:
+    """
+    Padroniza número de telefone para o formato Baileys WhatsApp: DDD12345678 (DDD + 8 dígitos)
+    
+    Aceita qualquer formato de entrada:
+    - (11) 99999-9999 → 1199999999
+    - 11 99999-9999 → 1199999999  
+    - 11999999999 → 1199999999
+    - +55 11 99999-9999 → 1199999999
+    - +5511999999999 → 1199999999
+    - 5511999999999 → 1199999999
+    - 011999999999 → 1199999999
+    
+    IMPORTANTE: Baileys aceita apenas DDD + 8 dígitos (formato antigo)
+    Se número moderno (9 dígitos) é informado, remove o primeiro 9
+    
+    Retorna sempre no formato: DDD12345678 (10 dígitos totais)
+    """
+    if not telefone:
+        return ""
+    
+    # Remover todos os caracteres não numéricos
+    apenas_numeros = re.sub(r'\D', '', str(telefone))
+    
+    # Se não tem números suficientes, retornar original
+    if len(apenas_numeros) < 10:
+        return telefone
+    
+    # Remover código do país (+55) se presente
+    if apenas_numeros.startswith('55') and len(apenas_numeros) >= 12:
+        apenas_numeros = apenas_numeros[2:]
+    
+    # Remover 0 à esquerda do DDD se presente (0XX para XX)
+    if apenas_numeros.startswith('0') and len(apenas_numeros) == 11:
+        apenas_numeros = apenas_numeros[1:]
+    
+    # Validar se tem pelo menos 10 dígitos
+    if len(apenas_numeros) < 10:
+        return telefone
+    
+    # CONVERSÃO PARA FORMATO BAILEYS (DDD + 8 DÍGITOS)
+    if len(apenas_numeros) == 10:
+        # Já está no formato correto: DDD + 8 dígitos
+        return apenas_numeros
+    elif len(apenas_numeros) == 11:
+        # Formato moderno (DDD + 9 dígitos) → remover primeiro 9
+        ddd = apenas_numeros[:2]
+        numero = apenas_numeros[2:]
+        
+        # Se começa com 9, remover para ficar com 8 dígitos
+        if numero.startswith('9'):
+            numero = numero[1:]  # Remove o primeiro 9
+        
+        return ddd + numero
+    else:
+        # Se tem mais dígitos, pegar DDD + últimos 8 dígitos
+        if len(apenas_numeros) > 11:
+            # Pegar últimos 10 dígitos (DDD + 8)
+            apenas_numeros = apenas_numeros[-10:]
+        
+        return apenas_numeros
+
+def validar_telefone_whatsapp(telefone: str) -> bool:
+    """
+    Valida se o telefone está no formato correto do Baileys WhatsApp (DDD12345678 - 10 dígitos)
+    """
+    telefone_padronizado = padronizar_telefone(telefone)
+    
+    # Verificar se tem exatamente 10 dígitos (DDD + 8 dígitos)
+    if len(telefone_padronizado) != 10:
+        return False
+    
+    # Verificar se é só números
+    if not telefone_padronizado.isdigit():
+        return False
+    
+    # Verificar se o DDD é válido (11 a 99)
+    ddd = telefone_padronizado[:2]
+    try:
+        ddd_num = int(ddd)
+        if not (11 <= ddd_num <= 99):
+            return False
+    except:
+        return False
+    
+    # Verificar se tem 8 dígitos após o DDD
+    numero = telefone_padronizado[2:]
+    if len(numero) != 8:
+        return False
+    
+    return True
+
+def formatar_telefone_exibicao(telefone: str) -> str:
+    """
+    Formata telefone para exibição amigável: (11) 9999-9999 (formato Baileys)
+    """
+    telefone_padrao = padronizar_telefone(telefone)
+    
+    if len(telefone_padrao) == 10:
+        ddd = telefone_padrao[:2]
+        parte1 = telefone_padrao[2:6]  # 4 dígitos
+        parte2 = telefone_padrao[6:]   # 4 dígitos
+        return f"({ddd}) {parte1}-{parte2}"
+    
+    return telefone
+
 def formatar_telefone(telefone: str) -> str:
-    """Formata telefone no padrão brasileiro"""
+    """Formata telefone no padrão brasileiro (função legada)"""
     if not telefone:
         return ""
     

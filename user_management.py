@@ -116,12 +116,12 @@ class UserManager:
                     
                     if agora <= proximo_vencimento:
                         dias_restantes = (proximo_vencimento - agora).days
-                    return {
-                        'acesso': True, 
-                        'tipo': 'pago',
-                        'dias_restantes': dias_restantes,
-                        'usuario': usuario
-                    }
+                        return {
+                            'acesso': True, 
+                            'tipo': 'pago',
+                            'dias_restantes': dias_restantes,
+                            'usuario': usuario
+                        }
                 else:
                     # Plano vencido
                     self.atualizar_status_usuario(chat_id, 'vencido', False)
@@ -211,6 +211,22 @@ class UserManager:
         except Exception as e:
             logger.error(f"Erro ao processar pagamento: {e}")
             return {'success': False, 'message': 'Erro ao processar pagamento'}
+    
+    def ativar_plano(self, chat_id, payment_id, valor=20.00):
+        """Ativa plano mensal após confirmação de pagamento (alias para processar_pagamento)"""
+        try:
+            logger.info(f"🔥 Ativando plano para usuário {chat_id} com payment_id {payment_id}")
+            resultado = self.processar_pagamento(chat_id, valor, payment_id)
+            
+            if resultado.get('success'):
+                logger.info(f"✅ Plano ativado com sucesso para usuário {chat_id}")
+            else:
+                logger.error(f"❌ Falha ao ativar plano para usuário {chat_id}: {resultado.get('message')}")
+                
+            return resultado
+        except Exception as e:
+            logger.error(f"Erro ao ativar plano: {e}")
+            return {'success': False, 'message': 'Erro interno ao ativar plano'}
     
     def registrar_pagamento(self, chat_id, valor, referencia):
         """Registra pagamento no histórico"""
@@ -386,4 +402,65 @@ class UserManager:
             
         except Exception as e:
             logger.error(f"Erro ao listar todos os usuários: {e}")
+            return []
+    
+    def listar_usuarios_por_status(self, status):
+        """Lista usuários por status específico"""
+        try:
+            query = """
+                SELECT id, chat_id, nome, email, status, proximo_vencimento, data_cadastro
+                FROM usuarios 
+                WHERE status = %s
+                ORDER BY data_cadastro DESC
+            """
+            usuarios = self.db.fetch_all(query, [status])
+            return [dict(u) for u in usuarios] if usuarios else []
+                
+        except Exception as e:
+            logger.error(f"Erro ao listar usuários por status {status}: {e}")
+            return []
+    
+    def obter_transacoes_recentes(self, dias=30):
+        """Obtém transações recentes dos últimos N dias"""
+        try:
+            from datetime import datetime, timedelta
+            
+            query = """
+                SELECT 
+                    u.nome as usuario_nome,
+                    u.email,
+                    p.valor,
+                    p.status,
+                    p.data_criacao,
+                    p.data_pagamento,
+                    p.payment_id
+                FROM pagamentos p 
+                JOIN usuarios u ON p.usuario_id = u.id 
+                WHERE p.data_criacao >= %s 
+                ORDER BY p.data_criacao DESC 
+                LIMIT 100
+            """
+            
+            data_limite = datetime.now() - timedelta(days=dias)
+            transacoes = self.db.fetch_all(query, [data_limite])
+            
+            if not transacoes:
+                return []
+                
+            # Converter para formato mais legível
+            resultado = []
+            for t in transacoes:
+                transacao_dict = dict(t)
+                # Formatar datas
+                if transacao_dict.get('data_pagamento'):
+                    transacao_dict['data_pagamento'] = transacao_dict['data_pagamento'].strftime('%d/%m/%Y %H:%M')
+                if transacao_dict.get('data_criacao'):
+                    transacao_dict['data_criacao'] = transacao_dict['data_criacao'].strftime('%d/%m/%Y %H:%M')
+                
+                resultado.append(transacao_dict)
+            
+            return resultado
+                
+        except Exception as e:
+            logger.error(f"Erro ao obter transações recentes: {e}")
             return []
