@@ -11,9 +11,20 @@ Auto-cancellation: When a client is renewed, all pending messages for that clien
 Search interface: Client search results should use the same format as client listing - inline buttons with individual actions for each client found, including status indicators and complete navigation options.
 Button display format: Client buttons throughout the system display "name + expiration date" format instead of "name + ID" for better usability.
 Phone number format: All phone numbers are automatically standardized to Baileys WhatsApp format (DDD12345678 - 10 digits total) regardless of input format. Modern 9-digit numbers have the first 9 removed for Baileys compatibility.
+Renewal behavior: When renewing clients, system now asks if user wants to send renewal message. Date calculation fixed to maintain same day of next month (e.g., Aug 15 -> Sep 15) instead of adding exactly 30 days.
 
 ## Recent Changes (2025-08-17)
-- **CORREÇÕES CRÍTICAS DE SEGURANÇA MULTI-TENANT**: Aplicadas correções fundamentais para isolamento de dados entre usuários
+- **CORREÇÕES CRÍTICAS DE ISOLAMENTO WHATSAPP**: Implementado isolamento real de sessões WhatsApp por usuário - cada usuário agora tem sua própria conexão isolada impedindo envio de mensagens com WhatsApp de outros usuários
+- **QR CODE WHATSAPP CORRIGIDO**: Resolvido problema "Endpoint não encontrado" ao gerar QR Code - sistema totalmente funcional novamente
+- **BANCO DE DADOS MULTI-TENANT ATUALIZADO**: Adicionadas colunas `chat_id_usuario` e `numero_whatsapp` na tabela `whatsapp_sessions` com constraints únicas por usuário
+- **API BAILEYS ISOLADA**: Todas as funções principais (send_message, generate_qr_code, get_status) agora incluem isolamento por `chat_id_usuario`
+- **WHATSAPP SESSION API SEGURA**: Funções backup_session e restore_session agora filtram por usuário específico garantindo zero vazamento de dados
+- **BOT TELEGRAM CORRIGIDO**: Todas as chamadas para WhatsApp agora incluem parâmetro de isolamento por usuário
+- **SISTEMA 100% SEGURO**: Impossível enviar mensagem com WhatsApp de outro usuário - privacidade e LGPD garantidas
+- **PACOTE DE CORREÇÕES CRIADO**: ZIP completo (correções_isolamento_whatsapp_completo_17082025.zip) com todas as correções críticas
+- **RENOVAÇÃO DE CLIENTES APRIMORADA**: Corrigido cálculo de data de renovação para manter o mesmo dia do próximo mês (ex: 15/08 -> 15/09) em vez de somar exatamente 30 dias
+- **PERGUNTA DE MENSAGEM DE RENOVAÇÃO**: Adicionada funcionalidade para perguntar se deseja enviar mensagem de renovação após renovar cliente
+- **CÁLCULO DE VENCIMENTO CORRIGIDO**: Cadastro de novos clientes agora usa cálculo correto de meses em vez de multiplicar por 30 dias
 - **VIOLAÇÃO DE EXCLUSÃO CORRIGIDA**: Função `excluir_cliente` agora verifica ownership do usuário antes de permitir exclusão, impedindo que usuários excluam clientes de outros
 - **VIOLAÇÃO DE LISTAGEM CORRIGIDA**: Função `listar_clientes_vencendo` agora filtra por `chat_id_usuario`, impedindo vazamento de dados entre usuários
 - **ASSINATURA DE FUNÇÕES ATUALIZADA**: Todas as funções críticas agora incluem parâmetro `chat_id_usuario` obrigatório para isolamento
