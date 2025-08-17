@@ -29,10 +29,13 @@ class WhatsAppSessionManager:
             query = """
             CREATE TABLE IF NOT EXISTS whatsapp_sessions (
                 id SERIAL PRIMARY KEY,
-                session_id VARCHAR(100) DEFAULT 'default' UNIQUE,
+                session_id VARCHAR(100) DEFAULT 'default',
+                chat_id_usuario BIGINT,
+                numero_whatsapp VARCHAR(15),
                 session_data JSONB NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(session_id, chat_id_usuario)
             )
             """
             
@@ -45,33 +48,36 @@ class WhatsAppSessionManager:
         except Exception as e:
             logger.error(f"Erro ao criar tabela de sessões: {e}")
     
-    def backup_session(self, session_data, session_id='default'):
-        """Salva dados da sessão no banco"""
+    def backup_session(self, session_data, session_id='default', chat_id_usuario=None, numero_whatsapp=None):
+        """Salva dados da sessão no banco com isolamento por usuário"""
         try:
             with self.db.get_connection() as conn:
                 with conn.cursor() as cursor:
                     # Verificar se já existe
-                    check_query = "SELECT id FROM whatsapp_sessions WHERE session_id = %s"
-                    cursor.execute(check_query, (session_id,))
+                    check_query = """
+                    SELECT id FROM whatsapp_sessions 
+                    WHERE session_id = %s AND chat_id_usuario = %s
+                    """
+                    cursor.execute(check_query, (session_id, chat_id_usuario))
                     existing = cursor.fetchone()
                     
                     if existing:
                         # Atualizar existente
                         update_query = """
                         UPDATE whatsapp_sessions 
-                        SET session_data = %s, updated_at = CURRENT_TIMESTAMP 
-                        WHERE session_id = %s
+                        SET session_data = %s, numero_whatsapp = %s, updated_at = CURRENT_TIMESTAMP 
+                        WHERE session_id = %s AND chat_id_usuario = %s
                         """
-                        cursor.execute(update_query, (json.dumps(session_data), session_id))
-                        logger.info(f"✅ Sessão {session_id} atualizada no banco")
+                        cursor.execute(update_query, (json.dumps(session_data), numero_whatsapp, session_id, chat_id_usuario))
+                        logger.info(f"✅ Sessão {session_id} (usuário {chat_id_usuario}) atualizada no banco")
                     else:
                         # Inserir nova
                         insert_query = """
-                        INSERT INTO whatsapp_sessions (session_id, session_data) 
-                        VALUES (%s, %s)
+                        INSERT INTO whatsapp_sessions (session_id, chat_id_usuario, numero_whatsapp, session_data) 
+                        VALUES (%s, %s, %s, %s)
                         """
-                        cursor.execute(insert_query, (session_id, json.dumps(session_data)))
-                        logger.info(f"✅ Nova sessão {session_id} salva no banco")
+                        cursor.execute(insert_query, (session_id, chat_id_usuario, numero_whatsapp, json.dumps(session_data)))
+                        logger.info(f"✅ Nova sessão {session_id} (usuário {chat_id_usuario}) salva no banco")
                     
                     conn.commit()
                     return True
@@ -80,40 +86,41 @@ class WhatsAppSessionManager:
             logger.error(f"Erro ao salvar sessão: {e}")
             return False
     
-    def restore_session(self, session_id='default'):
-        """Restaura dados da sessão do banco"""
+    def restore_session(self, session_id='default', chat_id_usuario=None):
+        """Restaura dados da sessão do banco com isolamento por usuário"""
         try:
             with self.db.get_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                     query = """
-                    SELECT session_data FROM whatsapp_sessions 
-                    WHERE session_id = %s 
+                    SELECT session_data, numero_whatsapp FROM whatsapp_sessions 
+                    WHERE session_id = %s AND chat_id_usuario = %s 
                     ORDER BY updated_at DESC LIMIT 1
                     """
-                    cursor.execute(query, (session_id,))
+                    cursor.execute(query, (session_id, chat_id_usuario))
                     result = cursor.fetchone()
                     
                     if result:
                         session_data = result['session_data']
-                        logger.info(f"✅ Sessão {session_id} restaurada do banco")
+                        numero_whatsapp = result['numero_whatsapp']
+                        logger.info(f"✅ Sessão {session_id} (usuário {chat_id_usuario}) restaurada do banco")
                         return session_data
                     else:
-                        logger.info(f"ℹ️ Nenhuma sessão {session_id} encontrada no banco")
+                        logger.info(f"ℹ️ Nenhuma sessão {session_id} (usuário {chat_id_usuario}) encontrada no banco")
                         return None
                         
         except Exception as e:
             logger.error(f"Erro ao restaurar sessão: {e}")
             return None
     
-    def delete_session(self, session_id='default'):
-        """Remove sessão do banco"""
+    def delete_session(self, session_id='default', chat_id_usuario=None):
+        """Remove sessão do banco com isolamento por usuário"""
         try:
             with self.db.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    query = "DELETE FROM whatsapp_sessions WHERE session_id = %s"
-                    cursor.execute(query, (session_id,))
+                    query = "DELETE FROM whatsapp_sessions WHERE session_id = %s AND chat_id_usuario = %s"
+                    cursor.execute(query, (session_id, chat_id_usuario))
                     conn.commit()
-            logger.info(f"✅ Sessão {session_id} removida do banco")
+            logger.info(f"✅ Sessão {session_id} (usuário {chat_id_usuario}) removida do banco")
             return True
             
         except Exception as e:

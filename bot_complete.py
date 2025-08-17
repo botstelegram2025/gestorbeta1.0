@@ -3147,9 +3147,9 @@ Exemplo: 15/10/2025"""
                 cliente
             )
             
-            # Enviar via WhatsApp
+            # Enviar via WhatsApp com isolamento por usuário
             telefone_formatado = f"55{cliente['telefone']}"
-            resultado = self.baileys_api.send_message(telefone_formatado, mensagem_processada)
+            resultado = self.baileys_api.send_message(telefone_formatado, mensagem_processada, chat_id)
             
             if resultado.get('success'):
                 # Registrar log de envio
@@ -8548,14 +8548,19 @@ Exemplos comuns:
                 "Verifique se a API está rodando em localhost:3000")
     
     def gerar_qr_whatsapp(self, chat_id):
-        """Gera e exibe QR Code para conectar WhatsApp"""
+        """Gera e exibe QR Code para conectar WhatsApp específico do usuário"""
         try:
-            # Primeiro verificar o status da conexão
+            # Primeiro verificar se há API Baileys disponível
+            if not self.baileys_api:
+                self.send_message(chat_id, 
+                    "❌ API WhatsApp não inicializada.\n\n"
+                    "Entre em contato com o administrador.")
+                return
+            
+            # Verificar o status da conexão específica do usuário
             try:
-                status_response = requests.get("http://localhost:3000/status", timeout=10)
-                if status_response.status_code == 200:
-                    status_data = status_response.json()
-                    is_connected = status_data.get('connected', False)
+                status_data = self.baileys_api.get_status(chat_id)
+                if status_data and not status_data.get('qr_needed', True):
                     
                     # Se já está conectado, mostrar informações da conexão
                     if is_connected:
@@ -8596,12 +8601,12 @@ Exemplos comuns:
             self.send_message(chat_id, "🔄 *Gerando QR Code...*\n\nAguarde um momento.", parse_mode='Markdown')
             
             try:
-                # Tentar obter QR code da API Baileys
-                response = requests.get("http://localhost:3000/qr", timeout=15)
+                # Tentar obter QR code específico do usuário
+                qr_result = self.baileys_api.generate_qr_code(chat_id)
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    qr_code = data.get('qr')
+                if qr_result.get('success'):
+                    qr_code = qr_result.get('qr_code')
+                    qr_image = qr_result.get('qr_image')
                     
                     if qr_code:
                         mensagem = """📱 *QR CODE WHATSAPP GERADO*
@@ -8617,8 +8622,7 @@ Exemplos comuns:
                         # Enviar instruções primeiro
                         self.send_message(chat_id, mensagem, parse_mode='Markdown')
                         
-                        # Enviar o QR code como imagem
-                        qr_image = data.get('qr_image')
+                        # Enviar o QR code como imagem (se disponível)
                         
                         if qr_image:
                             # Converter base64 para bytes e enviar como foto
@@ -8672,9 +8676,9 @@ Exemplos comuns:
                                         reply_markup={'inline_keyboard': inline_keyboard})
                         return
                     else:
-                        error_msg = "QR Code não retornado pela API"
+                        error_msg = qr_result.get('error', 'QR Code não retornado pela API')
                 else:
-                    error_msg = f"API retornou status {response.status_code}"
+                    error_msg = qr_result.get('error', 'Erro ao gerar QR Code')
             
             except requests.exceptions.ConnectionError:
                 error_msg = "API Baileys não está rodando (localhost:3000)"
@@ -8756,60 +8760,45 @@ _Mensagem automática de teste do bot_ 🤖"""
             
             self.send_message(chat_id, f"📤 Enviando teste para {cliente['nome']} ({telefone})...")
             
-            # Enviar via Baileys API
+            # Enviar via Baileys API com isolamento por usuário
             try:
-                payload = {
-                    'number': telefone,
-                    'message': mensagem
-                }
+                resultado = self.baileys_api.send_message(telefone, mensagem, chat_id)
                 
-                response = requests.post("http://localhost:3000/send-message", 
-                                       json=payload, timeout=30)
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    if result.get('success'):
-                        # Sucesso no envio
-                        self.send_message(chat_id, 
-                            f"✅ *Teste enviado com sucesso!*\n\n"
-                            f"📱 *Para:* {cliente['nome']}\n"
-                            f"📞 *Número:* {telefone}\n"
-                            f"📤 *Via:* WhatsApp/Baileys\n\n"
-                            f"🕐 *Enviado em:* {datetime.now().strftime('%H:%M:%S')}")
-                        
-                        # Registrar no log se DB disponível
-                        if self.db:
-                            self.db.registrar_envio(
-                                cliente_id=cliente['id'],
-                                template_id=None,
-                                telefone=telefone,
-                                mensagem=mensagem,
-                                tipo_envio='teste_manual',
-                                sucesso=True,
-                                message_id=result.get('messageId')
-                            )
-                    else:
-                        error_msg = result.get('error', 'Erro desconhecido')
-                        self.send_message(chat_id, 
-                            f"❌ *Falha no envio*\n\n"
-                            f"Erro: {error_msg}")
-                else:
+                if resultado.get('success'):
+                    # Sucesso no envio
                     self.send_message(chat_id, 
-                        f"❌ *Erro na API*\n\n"
-                        f"Status Code: {response.status_code}")
+                        f"✅ *Teste enviado com sucesso!*\n\n"
+                        f"📱 *Para:* {cliente['nome']}\n"
+                        f"📞 *Número:* {telefone}\n"
+                        f"📤 *Via:* WhatsApp/Baileys\n\n"
+                        f"🕐 *Enviado em:* {datetime.now().strftime('%H:%M:%S')}")
+                    
+                    # Registrar no log se DB disponível
+                    if self.db:
+                        self.db.registrar_envio(
+                            cliente_id=cliente['id'],
+                            template_id=None,
+                            telefone=telefone,
+                            mensagem=mensagem,
+                            tipo_envio='teste_manual',
+                            sucesso=True,
+                            message_id=resultado.get('messageId')
+                        )
+                else:
+                    error_msg = resultado.get('error', 'Erro desconhecido')
+                    self.send_message(chat_id, 
+                        f"❌ *Falha no envio*\n\n"
+                        f"Erro: {error_msg}")
                         
-            except requests.exceptions.Timeout:
-                self.send_message(chat_id, 
-                    "⏰ *Timeout no envio*\n\n"
-                    "O envio demorou muito para responder. Verifique a conexão com a API.")
             except Exception as api_error:
                 logger.error(f"Erro na API Baileys: {api_error}")
                 self.send_message(chat_id, 
                     f"❌ *Erro na comunicação com WhatsApp*\n\n"
                     f"Verifique se:\n"
-                    f"• WhatsApp está conectado\n"
+                    f"• WhatsApp está conectado para seu usuário\n"
                     f"• Número está correto\n"
-                    f"• API Baileys funcionando")
+                    f"• API Baileys funcionando\n\n"
+                    f"Erro: {str(api_error)}")
         
         except Exception as e:
             logger.error(f"Erro no teste de envio: {e}")
@@ -10403,7 +10392,7 @@ Confirma o envio da cobrança geral?"""
             if self.baileys_api:
                 try:
                     logger.info(f"[RAILWAY] Enviando mensagem WhatsApp para {telefone}")
-                    resultado = self.baileys_api.send_message(telefone, mensagem)
+                    resultado = self.baileys_api.send_message(telefone, mensagem, chat_id)
                     if resultado['success']:
                         sucesso = True
                         
@@ -11194,7 +11183,7 @@ def confirmar_envio_mensagem_global(chat_id, cliente_id, template_id):
         if telegram_bot.baileys_api:
             try:
                 logger.info(f"Enviando mensagem WhatsApp para {telefone}")
-                resultado = telegram_bot.baileys_api.send_message(telefone, mensagem)
+                resultado = telegram_bot.baileys_api.send_message(telefone, mensagem, chat_id)
                 if resultado['success']:
                     sucesso = True
                     

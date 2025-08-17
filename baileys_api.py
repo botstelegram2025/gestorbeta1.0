@@ -22,7 +22,8 @@ class BaileysAPI:
         """Inicializa a integração com Baileys API"""
         self.base_url = os.getenv('BAILEYS_API_URL', 'http://localhost:3000')
         self.api_key = os.getenv('BAILEYS_API_KEY', '')
-        self.session_name = os.getenv('BAILEYS_SESSION', 'bot_clientes')
+        # Remover sessão padrão fixa - será definida por usuário
+        self.default_session = os.getenv('BAILEYS_SESSION', 'bot_clientes')  # Apenas fallback
         self.timeout = int(os.getenv('BAILEYS_TIMEOUT', '30'))
         self.max_retries = int(os.getenv('BAILEYS_MAX_RETRIES', '3'))
         self.retry_delay = int(os.getenv('BAILEYS_RETRY_DELAY', '5'))
@@ -45,6 +46,10 @@ class BaileysAPI:
         self._cache_timeout = 300  # 5 minutos
         
         logger.info(f"Baileys API inicializada: {self.base_url}")
+    
+    def get_user_session(self, chat_id_usuario: int) -> str:
+        """Gera nome de sessão específico para o usuário"""
+        return f"user_{chat_id_usuario}"
     
     def _make_request(self, endpoint: str, method: str = 'GET', data: Dict = None, retries: int = None) -> Dict:
         """Faz requisição HTTP para a API Baileys"""
@@ -122,17 +127,21 @@ class BaileysAPI:
         
         return {'success': False, 'error': 'Máximo de tentativas excedido'}
     
-    def get_status(self) -> Dict:
-        """Obtém status da conexão WhatsApp"""
+    def get_status(self, chat_id_usuario: int = None) -> Dict:
+        """Obtém status da conexão WhatsApp para usuário específico"""
         try:
+            # Determinar sessão do usuário
+            session_name = self.get_user_session(chat_id_usuario) if chat_id_usuario else self.default_session
+            
             # Verificar cache
             now = time.time()
-            if ('status' in self._status_cache and 
-                now - self._status_cache.get('timestamp', 0) < self._cache_timeout):
-                return self._status_cache['status']
+            cache_key = f'status_{session_name}'
+            if (cache_key in self._status_cache and 
+                now - self._status_cache.get(f'{cache_key}_timestamp', 0) < self._cache_timeout):
+                return self._status_cache[cache_key]
             
             # Buscar status atual
-            response = self._make_request(f'status/{self.session_name}')
+            response = self._make_request(f'status/{session_name}')
             
             if response.get('success'):
                 status_data = response.get('data', {})
@@ -150,10 +159,8 @@ class BaileysAPI:
                 }
                 
                 # Atualizar cache
-                self._status_cache = {
-                    'status': status,
-                    'timestamp': now
-                }
+                self._status_cache[cache_key] = status
+                self._status_cache[f'{cache_key}_timestamp'] = now
                 
                 return status
             else:
@@ -208,15 +215,16 @@ class BaileysAPI:
         except:
             return 'Inválido'
     
-    def qr_code_needed(self) -> bool:
-        """Verifica se QR Code é necessário"""
-        status = self.get_status()
+    def qr_code_needed(self, chat_id_usuario: int) -> bool:
+        """Verifica se QR Code é necessário para usuário específico"""
+        status = self.get_status(chat_id_usuario)
         return status.get('qr_needed', True)
     
-    def generate_qr_code(self) -> Dict:
-        """Gera QR Code para conexão"""
+    def generate_qr_code(self, chat_id_usuario: int) -> Dict:
+        """Gera QR Code para conexão específica do usuário"""
         try:
-            response = self._make_request(f'qr/{self.session_name}', 'POST')
+            session_name = self.get_user_session(chat_id_usuario)
+            response = self._make_request(f'qr/{session_name}', 'POST')
             
             if response.get('success'):
                 qr_data = response.get('data', {})
@@ -256,19 +264,20 @@ class BaileysAPI:
             logger.error(f"Erro ao gerar QR Code: {e}")
             return {'success': False, 'error': str(e)}
     
-    def send_message(self, phone: str, message: str, options: Dict = None) -> Dict:
-        """Envia mensagem via WhatsApp"""
+    def send_message(self, phone: str, message: str, chat_id_usuario: int, options: Dict = None) -> Dict:
+        """Envia mensagem via WhatsApp do usuário específico"""
         try:
             # Limpar e formatar telefone
             clean_phone = self._clean_phone_number(phone)
             if not clean_phone:
                 return {'success': False, 'error': 'Número de telefone inválido'}
             
-            # Preparar dados da mensagem
+            # Preparar dados da mensagem com sessão do usuário
+            session_name = self.get_user_session(chat_id_usuario)
             data = {
                 'number': clean_phone,
                 'message': message,
-                'session': self.session_name
+                'session': session_name
             }
             
             # Opções adicionais
@@ -298,17 +307,18 @@ class BaileysAPI:
             logger.error(f"Erro ao enviar mensagem: {e}")
             return {'success': False, 'error': str(e)}
     
-    def send_image(self, phone: str, image_path: str, caption: str = None) -> Dict:
-        """Envia imagem via WhatsApp"""
+    def send_image(self, phone: str, image_path: str, chat_id_usuario: int, caption: str = None) -> Dict:
+        """Envia imagem via WhatsApp do usuário específico"""
         try:
             clean_phone = self._clean_phone_number(phone)
             if not clean_phone:
                 return {'success': False, 'error': 'Número de telefone inválido'}
             
+            session_name = self.get_user_session(chat_id_usuario)
             data = {
                 'number': clean_phone,
                 'image': image_path,
-                'session': self.session_name
+                'session': session_name
             }
             
             if caption:
