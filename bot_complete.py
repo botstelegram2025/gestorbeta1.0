@@ -8488,29 +8488,28 @@ Exemplos comuns:
             logger.error(f"Erro ao mostrar menu Baileys: {e}")
             self.send_message(chat_id, "❌ Erro ao carregar menu WhatsApp.")
     
-    
-def verificar_status_baileys(self, chat_id):
-    """Verifica status da API Baileys por SESSÃO do usuário (corrigido para multi-sessão)."""
-    try:
-        # Usa o client oficial para status por sessão
-        data = self.baileys_api.get_status(chat_id)
-
-        # Normaliza campos vindos do server/client
-        connected = bool(data.get('connected')) or (str(data.get('status', '')).startswith('🟢'))
-        qr_available = bool(data.get('qr_available')) or bool(data.get('qr_needed'))
-        session = data.get('session') or data.get('session_id') or self.baileys_api.get_user_session(chat_id)
-
-        if connected:
-            status = "🟢 *Conectado*"
-            info = "WhatsApp conectado e pronto para envios!"
-        elif qr_available:
-            status = "🟡 *Aguardando QR Code*"
-            info = "API online, mas WhatsApp não conectado. Escaneie o QR Code."
-        else:
-            status = "🔴 *Desconectado*"
-            info = "WhatsApp não conectado."
-
-        mensagem = f"""📱 *STATUS WHATSAPP/BAILEYS*
+    def verificar_status_baileys(self, chat_id):
+        """Verifica status da API Baileys em tempo real"""
+        try:
+            response = requests.get("http://localhost:3000/status", timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                connected = data.get('connected', False)
+                session = data.get('session', 'desconhecida')
+                qr_available = data.get('qr_available', False)
+                
+                if connected:
+                    status = "🟢 *Conectado*"
+                    info = "WhatsApp conectado e pronto para envios!"
+                elif qr_available:
+                    status = "🟡 *Aguardando QR Code*"
+                    info = "API online, mas WhatsApp não conectado. Escaneie o QR Code."
+                else:
+                    status = "🔴 *Desconectado*"
+                    info = "WhatsApp não conectado."
+                
+                mensagem = f"""📱 *STATUS WHATSAPP/BAILEYS*
 
 {status}
 
@@ -8520,42 +8519,35 @@ def verificar_status_baileys(self, chat_id):
 • API Responsiva: ✅
 
 💡 *Info:* {info}"""
-
-        inline_keyboard = [[
-            {'text': '🔄 Atualizar', 'callback_data': 'baileys_status'},
-            {'text': '🔙 Voltar', 'callback_data': 'baileys_menu'}
-        ]]
-
-        if qr_available and not connected:
-            inline_keyboard.append([
-                {'text': '📷 Mostrar QR Code', 'callback_data': 'baileys_qr'}
-            ])
-
-        self.send_message(chat_id, mensagem, parse_mode='Markdown',
-                          reply_markup={'inline_keyboard': inline_keyboard})
-    except Exception as e:
-        logger.error(f"Erro ao verificar status Baileys: {e}")
-        # Fallback: tenta endpoint global só para dizer se API está viva
-        try:
-            import requests
-            r = requests.get(f"{self.baileys_api.base_url}/status", timeout=5)
-            api_online = (r.status_code == 200)
-        except Exception:
-            api_online = False
-        self.send_message(chat_id,
-            "📱 *STATUS WHATSAPP/BAILEYS*\n\n"
-            "🔴 *Desconectado*\n\n"
-            "📊 *Detalhes:*\n"
-            f"• Sessão: {self.baileys_api.get_user_session(chat_id)}\n"
-            f"• QR Disponível: ❌\n"
-            f"• API Responsiva: {'✅' if api_online else '❌'}\n\n"
-            "💡 *Info:* Não foi possível obter o status da sessão.", 
-            parse_mode='Markdown',
-            reply_markup={'inline_keyboard': [[
-                {'text': '🔄 Atualizar', 'callback_data': 'baileys_status'},
-                {'text': '🔙 Voltar', 'callback_data': 'baileys_menu'}
-            ]]})
-gerar_qr_whatsapp(self, chat_id):
+                
+                inline_keyboard = [[
+                    {'text': '🔄 Atualizar', 'callback_data': 'baileys_status'},
+                    {'text': '🔙 Voltar', 'callback_data': 'baileys_menu'}
+                ]]
+                
+                if qr_available:
+                    inline_keyboard.insert(0, [
+                        {'text': '📱 Gerar QR Code', 'callback_data': 'baileys_qr_code'}
+                    ])
+                
+            else:
+                mensagem = "❌ *API BAILEYS OFFLINE*\n\nA API não está respondendo. Verifique se está rodando em localhost:3000"
+                inline_keyboard = [[
+                    {'text': '🔄 Tentar Novamente', 'callback_data': 'baileys_status'},
+                    {'text': '🔙 Voltar', 'callback_data': 'baileys_menu'}
+                ]]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+        
+        except Exception as e:
+            logger.error(f"Erro ao verificar status Baileys: {e}")
+            self.send_message(chat_id, 
+                "❌ Erro ao conectar com a API Baileys.\n\n"
+                "Verifique se a API está rodando em localhost:3000")
+    
+    def gerar_qr_whatsapp(self, chat_id):
         """Gera e exibe QR Code para conectar WhatsApp específico do usuário"""
         try:
             # Primeiro verificar se há API Baileys disponível
