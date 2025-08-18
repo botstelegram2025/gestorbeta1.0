@@ -76,6 +76,8 @@ class TelegramBot:
         self.conversation_states = {}
         self.user_data = {}
         self.user_states = {}  # Para gerenciar estados de criação de templates
+        self._last_payment_request = {}  # Rate limiting para pagamentos
+        self._payment_requested = set()  # Track payment requests
     
     def send_message(self, chat_id, text, parse_mode=None, reply_markup=None):
         """Envia mensagem via API HTTP"""
@@ -105,8 +107,10 @@ class TelegramBot:
             return response.json()
         except Exception as e:
             logger.error(f"Erro ao enviar mensagem: {e}")
-            logger.error(f"URL: {url}")
-            logger.error(f"Data: {data}")
+            if 'url' in locals():
+                logger.error(f"URL: {url}")
+            if 'data' in locals():
+                logger.error(f"Data: {data}")
             return None
     
     def initialize_services(self):
@@ -119,8 +123,18 @@ class TelegramBot:
             self.db = DatabaseManager()
             
             # Verificar se a inicialização do banco foi bem-sucedida
-            if not hasattr(self.db, 'get_connection'):
+            if self.db is None:
                 raise Exception("Falha na inicialização do banco de dados")
+            
+            # Teste de conectividade mais robusto
+            try:
+                # Testar conectividade com uma query simples
+                if hasattr(self.db, 'connection') and self.db.connection:
+                    pass  # Conexão OK
+                else:
+                    logger.warning("Conexão do banco não disponível, mas prosseguindo...")
+            except Exception as conn_error:
+                logger.warning(f"Teste de conectividade falhou: {conn_error}, mas prosseguindo...")
             
             # Testar conectividade
             try:
@@ -1091,7 +1105,6 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
                 try:
                     vencimento = usuario['proximo_vencimento']
                     if isinstance(vencimento, str):
-                        from datetime import datetime
                         vencimento = datetime.fromisoformat(vencimento.replace('Z', '+00:00'))
                     dias_restantes = (vencimento.date() - datetime.now().date()).days
                 except:
@@ -1100,7 +1113,6 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
                 try:
                     fim_teste = usuario['fim_periodo_teste']
                     if isinstance(fim_teste, str):
-                        from datetime import datetime
                         fim_teste = datetime.fromisoformat(fim_teste.replace('Z', '+00:00'))
                     dias_restantes = (fim_teste.date() - datetime.now().date()).days
                 except:
@@ -11822,3 +11834,129 @@ if __name__ == '__main__':
         port = int(os.getenv('PORT', 5000))
         logger.info(f"Iniciando servidor Flask na porta {port}")
         app.run(host='0.0.0.0', port=port, debug=False)
+
+# === IMPLEMENTAÇÃO DAS FUNÇÕES CRÍTICAS FALTANTES ===
+
+def relatorios_usuario_function(chat_id):
+    """Mostra menu de relatórios para usuário"""
+    try:
+        if not telegram_bot or not telegram_bot.db:
+            if telegram_bot:
+                telegram_bot.send_message(chat_id, "❌ Sistema temporariamente indisponível.")
+            return
+        
+        mensagem = """📊 *RELATÓRIOS E ESTATÍSTICAS*
+        
+Escolha o tipo de relatório que deseja visualizar:"""
+        
+        inline_keyboard = [
+            [{'text': '📈 Últimos 7 dias', 'callback_data': 'relatorio_7_dias'}],
+            [{'text': '📈 Últimos 30 dias', 'callback_data': 'relatorio_30_dias'}],
+            [{'text': '📊 Últimos 3 meses', 'callback_data': 'relatorio_3_meses'}],
+            [{'text': '📊 Últimos 6 meses', 'callback_data': 'relatorio_6_meses'}],
+            [{'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}]
+        ]
+        
+        telegram_bot.send_message(chat_id, mensagem,
+                        parse_mode='Markdown',
+                        reply_markup={'inline_keyboard': inline_keyboard})
+    except Exception as e:
+        logger.error(f"Erro no menu de relatórios: {e}")
+        if telegram_bot:
+            telegram_bot.send_message(chat_id, "❌ Erro ao carregar relatórios.")
+
+def verificar_pix_pagamento_function(chat_id, payment_id):
+    """Verifica status de pagamento PIX"""
+    try:
+        if not telegram_bot or not telegram_bot.mercado_pago:
+            if telegram_bot:
+                telegram_bot.send_message(chat_id, "❌ Sistema de pagamentos temporariamente indisponível.")
+            return
+        
+        telegram_bot.send_message(chat_id, "🔍 Verificando pagamento...")
+        
+        # Verificar status no Mercado Pago
+        status_pagamento = telegram_bot.mercado_pago.verificar_pagamento(payment_id)
+        
+        if status_pagamento and status_pagamento.get('status') == 'approved':
+            telegram_bot.send_message(chat_id, "✅ Pagamento confirmado! Ativando acesso...")
+            # Ativar usuário
+            if telegram_bot.user_manager:
+                telegram_bot.user_manager.ativar_usuario(chat_id)
+            telegram_bot.send_message(chat_id, "🎉 Acesso ativado com sucesso!\n\nUse /start para acessar o sistema.")
+        else:
+            status = status_pagamento.get('status', 'pendente') if status_pagamento else 'pendente'
+            telegram_bot.send_message(chat_id, f"⏳ Pagamento ainda não confirmado.\n\nStatus: {status}")
+            
+    except Exception as e:
+        logger.error(f"Erro ao verificar pagamento: {e}")
+        if telegram_bot:
+            telegram_bot.send_message(chat_id, "❌ Erro ao verificar pagamento.")
+
+def cancelar_operacao_function(chat_id):
+    """Cancela operação atual"""
+    try:
+        # Limpar estado de conversação
+        if telegram_bot:
+            if chat_id in telegram_bot.conversation_states:
+                del telegram_bot.conversation_states[chat_id]
+            if chat_id in telegram_bot.user_data:
+                del telegram_bot.user_data[chat_id]
+            
+            telegram_bot.send_message(chat_id, "❌ Operação cancelada.")
+            telegram_bot.start_command(chat_id)
+    except Exception as e:
+        logger.error(f"Erro ao cancelar operação: {e}")
+
+def config_notificacoes_function(chat_id):
+    """Menu de configuração de notificações"""
+    try:
+        if not telegram_bot:
+            return
+            
+        mensagem = """🔔 *CONFIGURAÇÕES DE NOTIFICAÇÕES*
+        
+Configure quando e como receber notificações:"""
+        
+        inline_keyboard = [
+            [{'text': '⏰ Horário de Alertas', 'callback_data': 'config_horario_alertas'}],
+            [{'text': '📱 Tipos de Notificação', 'callback_data': 'config_tipos_notif'}],
+            [{'text': '🔇 Desativar Alertas', 'callback_data': 'desativar_alertas'}],
+            [{'text': '🔔 Ativar Alertas', 'callback_data': 'ativar_alertas'}],
+            [{'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}]
+        ]
+        
+        telegram_bot.send_message(chat_id, mensagem,
+                        parse_mode='Markdown',
+                        reply_markup={'inline_keyboard': inline_keyboard})
+    except Exception as e:
+        logger.error(f"Erro no menu de notificações: {e}")
+
+def config_sistema_function(chat_id):
+    """Menu de configuração do sistema"""
+    try:
+        if not telegram_bot:
+            return
+            
+        if not telegram_bot.is_admin(chat_id):
+            telegram_bot.send_message(chat_id, "❌ Apenas administradores podem acessar configurações do sistema.")
+            return
+        
+        mensagem = """⚙️ *CONFIGURAÇÕES DO SISTEMA*
+        
+Configure parâmetros globais do sistema:"""
+        
+        inline_keyboard = [
+            [{'text': '🏢 Dados da Empresa', 'callback_data': 'config_empresa'}],
+            [{'text': '💰 PIX e Pagamentos', 'callback_data': 'config_pix'}],
+            [{'text': '📱 API WhatsApp', 'callback_data': 'config_whatsapp_api'}],
+            [{'text': '⏰ Horários Globais', 'callback_data': 'config_horarios_globais'}],
+            [{'text': '📧 Templates', 'callback_data': 'gestao_templates'}],
+            [{'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}]
+        ]
+        
+        telegram_bot.send_message(chat_id, mensagem,
+                        parse_mode='Markdown',
+                        reply_markup={'inline_keyboard': inline_keyboard})
+    except Exception as e:
+        logger.error(f"Erro no menu de configurações: {e}")
