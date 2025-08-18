@@ -15,6 +15,9 @@ Renewal behavior: When renewing clients, system now asks if user wants to send r
 Cache behavior: Client list updates immediately after any edit operation. System automatically invalidates cache when client data is modified to ensure real-time data display.
 Template protection: System templates (chat_id_usuario = NULL) cannot be edited by users. Only custom user templates can be modified.
 User validation: Automatic messages only sent when valid chat_id_usuario is present, preventing orphaned messages.
+QR code persistence: WhatsApp sessions automatically saved to PostgreSQL and restored on Railway deploys, eliminating need to re-scan QR codes after updates.
+Daily alerts isolation: Daily verification alerts and automatic message processing now fully isolated by user - each user receives only their own client data and alerts.
+Hybrid scheduling system: System uses global schedules for efficiency but detects and logs individual user preferences. Data processing completely isolated by user while maintaining centralized timing for optimal resource usage.
 
 ## System Architecture
 

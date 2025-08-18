@@ -41,10 +41,17 @@ class MessageScheduler:
         """Configura os jobs principais do sistema"""
         
         try:
-            # Carregar horários salvos no banco ou usar padrões
-            horario_envio = self._get_horario_config('horario_envio', '09:00')
-            horario_verificacao = self._get_horario_config('horario_verificacao', '09:00')  
-            horario_limpeza = self._get_horario_config('horario_limpeza', '02:00')
+            # DECISÃO ARQUITETURAL: Sistema Híbrido de Horários
+            # 1. SISTEMA PRINCIPAL: Usa horários GLOBAIS para otimização
+            # 2. PREFERÊNCIAS USUÁRIO: Detectadas e logadas, mas execução centralizada
+            # 3. FUTURO: Possibilidade de jobs individuais por usuário se necessário
+            
+            horario_envio = self._get_horario_config_global('horario_envio', '09:00')
+            horario_verificacao = self._get_horario_config_global('horario_verificacao', '09:00')  
+            horario_limpeza = self._get_horario_config_global('horario_limpeza', '02:00')
+            
+            logger.info(f"Sistema usando horários globais: Envio {horario_envio}, Verificação {horario_verificacao}")
+            logger.info("Preferências individuais de horário são detectadas mas execução é centralizada para eficiência")
             
             # Parse dos horários com validação
             try:
@@ -59,7 +66,7 @@ class MessageScheduler:
                 hora_limp, min_limp = 2, 0
             
             # Limpar jobs existentes antes de criar novos
-            job_ids = ['envio_diario_9h', 'limpar_fila', 'alerta_admin']
+            job_ids = ['envio_diario_9h', 'limpar_fila', 'alerta_admin', 'alertas_usuarios']
             for job_id in job_ids:
                 try:
                     if self.scheduler.get_job(job_id):
@@ -85,12 +92,12 @@ class MessageScheduler:
                 replace_existing=True
             )
             
-            # Alerta diário para administrador no horário configurado
+            # Alerta diário para usuários (cada um recebe apenas de seus clientes)
             self.scheduler.add_job(
-                func=self._enviar_alerta_admin,
+                func=self._enviar_alertas_usuarios,
                 trigger=CronTrigger(hour=hora_verif, minute=min_verif, timezone=self.scheduler.timezone),
-                id='alerta_admin',
-                name=f'Alerta Diário Administrador às {horario_verificacao}',
+                id='alertas_usuarios',
+                name=f'Alertas Diários por Usuário às {horario_verificacao}',
                 replace_existing=True
             )
             
@@ -232,7 +239,7 @@ class MessageScheduler:
         """Processa e envia todas as mensagens necessárias às 9h da manhã"""
         try:
             logger.info("=== ENVIO DIÁRIO ÀS 9H DA MANHÃ ===")
-            logger.info("Processando e enviando mensagens...")
+            logger.info("Processando e enviando mensagens POR USUÁRIO...")
             
             hoje = agora_br().date()
             amanha = hoje + timedelta(days=1)
@@ -240,8 +247,108 @@ class MessageScheduler:
             # 1. VERIFICAR USUÁRIOS DO SISTEMA (teste/renovação)
             self._verificar_usuarios_sistema(amanha)
             
-            # 2. PROCESSAR CLIENTES (mensagens WhatsApp) - TODOS OS USUÁRIOS
-            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None)
+            # 2. OBTER LISTA DE USUÁRIOS ATIVOS e processar CADA UM separadamente
+            usuarios_ativos = self._obter_usuarios_ativos()
+            
+            if not usuarios_ativos:
+                logger.info("Nenhum usuário ativo encontrado para processamento")
+                return
+                
+            logger.info(f"Processando clientes de {len(usuarios_ativos)} usuários ativos")
+            
+            enviadas_total = 0
+            
+            # Processar clientes de cada usuário separadamente
+            for usuario in usuarios_ativos:
+                chat_id_usuario = usuario['chat_id']
+                enviadas_usuario = self._processar_clientes_usuario(chat_id_usuario, hoje)
+                enviadas_total += enviadas_usuario
+                logger.info(f"Usuário {chat_id_usuario}: {enviadas_usuario} mensagens enviadas")
+            
+            logger.info(f"=== ENVIO CONCLUÍDO: {enviadas_total} mensagens enviadas às 9h ===")
+            
+        except Exception as e:
+            logger.error(f"Erro no envio diário às 9h: {e}")
+    
+    def _obter_usuarios_ativos(self):
+        """Obtém lista de usuários ativos do sistema"""
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT chat_id, nome
+                    FROM usuarios 
+                    WHERE plano_ativo = true
+                    AND (status = 'ativo' OR status = 'teste_gratuito')
+                    ORDER BY chat_id
+                """)
+                usuarios = cursor.fetchall()
+                return [dict(usuario) for usuario in usuarios]
+                
+        except Exception as e:
+            logger.error(f"Erro ao obter usuários ativos: {e}")
+            return []
+    
+    def _processar_clientes_usuario(self, chat_id_usuario, hoje):
+        """Processa clientes de um usuário específico"""
+        try:
+            # Verificar se este usuário tem horário personalizado de envio
+            horario_usuario = self._get_horario_config_usuario('horario_envio', chat_id_usuario, None)
+            hora_atual = agora_br().strftime('%H:%M')
+            
+            if horario_usuario and horario_usuario != hora_atual[:5]:  # Comparar HH:MM
+                logger.info(f"Usuário {chat_id_usuario} tem horário personalizado {horario_usuario}, mas executando no horário global")
+            
+            # Buscar clientes APENAS deste usuário
+            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id_usuario)
+            
+            if not clientes:
+                logger.debug(f"Usuário {chat_id_usuario}: Nenhum cliente ativo encontrado")
+                return 0
+            
+            enviadas = 0
+            
+            for cliente in clientes:
+                try:
+                    vencimento = cliente['vencimento']
+                    dias_vencimento = (vencimento - hoje).days
+                    
+                    # 1. Cliente vencido há exatamente 1 dia - PRIORIDADE DE COBRANÇA
+                    if dias_vencimento == -1:
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_1dia_apos', chat_id_usuario):
+                            enviadas += 1
+                            logger.info(f"💰 Cobrança enviada: {cliente['nome']} (vencido há 1 dia) - Usuário {chat_id_usuario}")
+                    
+                    # 2. Cliente vence hoje - Enviar alerta urgente
+                    elif dias_vencimento == 0:
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_hoje', chat_id_usuario):
+                            enviadas += 1
+                            logger.info(f"🚨 Alerta enviado: {cliente['nome']} (vence hoje) - Usuário {chat_id_usuario}")
+                    
+                    # 3. Cliente vence amanhã - Enviar lembrete (1 dia antes)
+                    elif dias_vencimento == 1:
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias', chat_id_usuario):
+                            enviadas += 1
+                            logger.info(f"⏰ Lembrete enviado: {cliente['nome']} (vence amanhã) - Usuário {chat_id_usuario}")
+                    
+                    # 4. Cliente vence em 2 dias - Enviar lembrete (2 dias antes)
+                    elif dias_vencimento == 2:
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias', chat_id_usuario):
+                            enviadas += 1
+                            logger.info(f"⏰ Lembrete enviado: {cliente['nome']} (vence em 2 dias) - Usuário {chat_id_usuario}")
+                    
+                    # 5. Clientes que vencem em mais de 2 dias - NÃO processar
+                    elif dias_vencimento > 2:
+                        logger.debug(f"Cliente {cliente['nome']} vence em {dias_vencimento} dias - aguardando")
+                        
+                except Exception as e:
+                    logger.error(f"Erro ao processar cliente {cliente['nome']}: {e}")
+            
+            return enviadas
+            
+        except Exception as e:
+            logger.error(f"Erro ao processar clientes do usuário {chat_id_usuario}: {e}")
+            return 0
             
             if not clientes:
                 logger.info("Nenhum cliente ativo encontrado")
@@ -358,9 +465,13 @@ class MessageScheduler:
             logger.error(f"Erro no processamento forçado de vencidos: {e}")
             return 0
     
-    def _enviar_mensagem_cliente(self, cliente, tipo_template):
+    def _enviar_mensagem_cliente(self, cliente, tipo_template, chat_id_usuario=None):
         """Envia mensagem imediatamente para o cliente"""
         try:
+            # Obter chat_id_usuario do cliente se não foi passado
+            if not chat_id_usuario:
+                chat_id_usuario = cliente.get('chat_id_usuario')
+            
             # Verificar preferências de notificação PRIMEIRO
             if not self._cliente_pode_receber_mensagem(cliente, tipo_template):
                 logger.info(f"Cliente {cliente['nome']} optou por não receber mensagens do tipo {tipo_template}")
@@ -793,19 +904,53 @@ Renove agora e mantenha tudo funcionando! 👇"""
             logger.error(f"Erro ao cancelar mensagens de cliente renovado: {e}")
             return 0
     
-    def _enviar_alerta_admin(self):
-        """Envia alerta diário para o administrador sobre vencimentos"""
+    def _enviar_alertas_usuarios(self):
+        """Envia alerta diário isolado para cada usuário sobre seus clientes"""
         try:
             import os
-            logger.info("Enviando alerta diário para administrador...")
+            logger.info("Enviando alertas diários isolados por usuário...")
             
-            # Buscar clientes vencendo hoje e próximos dias
+            # Obter usuários ativos
+            usuarios_ativos = self._obter_usuarios_ativos()
+            
+            if not usuarios_ativos:
+                logger.info("Nenhum usuário ativo para envio de alertas")
+                return
+            
+            # Enviar alerta para cada usuário separadamente
+            for usuario in usuarios_ativos:
+                chat_id_usuario = usuario['chat_id']
+                try:
+                    self._enviar_alerta_usuario_individual(chat_id_usuario)
+                except Exception as e:
+                    logger.error(f"Erro ao enviar alerta para usuário {chat_id_usuario}: {e}")
+            
+            logger.info(f"Alertas enviados para {len(usuarios_ativos)} usuários")
+            
+        except Exception as e:
+            logger.error(f"Erro no envio de alertas diários: {e}")
+    
+    def _enviar_alerta_usuario_individual(self, chat_id_usuario):
+        """Envia alerta individual para um usuário específico sobre APENAS seus clientes"""
+        try:
+            import os
+            logger.info(f"Enviando alerta diário para usuário {chat_id_usuario}...")
+            
+            # Verificar se este usuário tem horário personalizado de alerta
+            horario_alerta_usuario = self._get_horario_config_usuario('horario_verificacao', chat_id_usuario, None)
+            if horario_alerta_usuario:
+                hora_atual = agora_br().strftime('%H:%M')
+                if horario_alerta_usuario != hora_atual[:5]:  # Comparar HH:MM
+                    logger.info(f"Usuário {chat_id_usuario} prefere alertas às {horario_alerta_usuario}, mas executando no horário global por eficiência")
+            
+            # Buscar clientes vencendo hoje e próximos dias APENAS deste usuário
             hoje = agora_br().date()
             clientes_hoje = []
             clientes_proximos = []
             clientes_vencidos = []
             
-            clientes = self.db.listar_clientes(apenas_ativos=True)
+            # Buscar APENAS clientes deste usuário específico
+            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id_usuario)
             
             for cliente in clientes:
                 try:
@@ -1056,13 +1201,32 @@ Tudo sob controle! 👍"""
         """Obtém fila completa de mensagens"""
         return self.obter_tarefas_pendentes()
     
-    def _get_horario_config(self, chave, default='09:00'):
-        """Obtém horário configurado do banco ou usa padrão"""
+    def _get_horario_config_global(self, chave, default='09:00'):
+        """Obtém horário configurado GLOBAL do banco ou usa padrão"""
         try:
-            config = self.db.obter_configuracao(chave)
+            # Usar configuração global (sem chat_id_usuario) para horários do sistema
+            config = self.db.obter_configuracao(chave, chat_id_usuario=None)
             if config:
                 return config
         except Exception as e:
-            logger.warning(f"Erro ao carregar configuração {chave}: {e}")
+            logger.warning(f"Erro ao carregar configuração global {chave}: {e}")
+        
+        return default
+    
+    def _get_horario_config_usuario(self, chave, chat_id_usuario, default='09:00'):
+        """Obtém horário configurado POR USUÁRIO ou usa global como fallback"""
+        try:
+            # Primeiro tentar configuração específica do usuário
+            config = self.db.obter_configuracao(chave, chat_id_usuario=chat_id_usuario)
+            if config:
+                return config
+            
+            # Se não encontrar, usar configuração global como fallback
+            config = self.db.obter_configuracao(chave, chat_id_usuario=None)
+            if config:
+                return config
+                
+        except Exception as e:
+            logger.warning(f"Erro ao carregar configuração {chave} para usuário {chat_id_usuario}: {e}")
         
         return default

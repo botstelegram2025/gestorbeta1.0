@@ -792,6 +792,9 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
         elif text == '📱 Status WhatsApp':
             self.config_baileys_status(chat_id)
         
+        elif text == '📝 Templates':
+            self.templates_menu(chat_id)
+        
         elif text == '⚙️ Horários':
             self.config_horarios(chat_id)
         
@@ -4291,12 +4294,17 @@ Selecione o período desejado para análise:
             db_status = "🟢 Conectado" if self.db else "🔴 Desconectado"
             bot_status = "🟢 Ativo" if self.base_url else "🔴 Inativo"
             
-            # Verificar WhatsApp
+            # Verificar WhatsApp com sessionId do usuário admin
             whatsapp_status = "🔴 Desconectado"
             try:
-                response = requests.get("http://localhost:3000/status", timeout=3)
+                session_id = f"user_{chat_id}"
+                response = requests.get(f"http://localhost:3000/status/{session_id}", timeout=3)
                 if response.status_code == 200:
-                    whatsapp_status = "🟢 Conectado"
+                    data = response.json()
+                    if data.get('connected'):
+                        whatsapp_status = "🟢 Conectado"
+                    else:
+                        whatsapp_status = "🟡 API Online"
             except:
                 pass
             
@@ -8437,14 +8445,18 @@ Exemplos comuns:
             api_online = False
             
             try:
-                # Tentar verificar status
-                response = requests.get("http://localhost:3000/status", timeout=5)
+                # Tentar verificar status usando sessionId específico do usuário
+                session_id = f"user_{chat_id}"
+                response = requests.get(f"http://localhost:3000/status/{session_id}", timeout=5)
                 if response.status_code == 200:
                     api_online = True
                     data = response.json()
                     if data.get('connected'):
                         status_baileys = "🟢 Conectado"
                         qr_disponivel = False  # Já conectado, não precisa de QR
+                    elif data.get('status') == 'not_initialized':
+                        status_baileys = "🟡 API Online, Aguardando Conexão"
+                        qr_disponivel = True
                     else:
                         status_baileys = "🟡 API Online, WhatsApp Desconectado"
                         qr_disponivel = True
@@ -10877,7 +10889,8 @@ def health_check():
             # Verificar conexão Baileys (opcional)
             try:
                 import requests
-                response = requests.get("http://localhost:3000/status", timeout=1)
+                # Usar sessionId padrão para verificação geral
+                response = requests.get("http://localhost:3000/status/default", timeout=1)
                 if response.status_code == 200:
                     baileys_connected = response.json().get('connected', False)
             except:
