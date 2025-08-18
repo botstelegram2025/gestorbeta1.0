@@ -1905,8 +1905,8 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
                 cliente_id = int(callback_data.split('_')[2])
                 self.toggle_notificacao_geral(chat_id, cliente_id, message_id)
             
-            elif callback_data.startswith('confirmar_excluir_'):
-                cliente_id = int(callback_data.split('_')[2])
+            elif callback_data.startswith('confirmar_excluir_cliente_'):
+                cliente_id = int(callback_data.split('_')[3])
                 self.excluir_cliente(chat_id, cliente_id, message_id)
             
             # Callbacks de cópia removidos - informações agora copiáveis diretamente
@@ -1952,8 +1952,20 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
                 self.confirmar_exclusao_template(chat_id, template_id, message_id)
             
             elif callback_data.startswith('confirmar_excluir_template_'):
-                template_id = int(callback_data.split('_')[3])
-                self.excluir_template(chat_id, template_id, message_id)
+                try:
+                    # CORREÇÃO: Pegar o último elemento após split para obter o template_id
+                    logger.info(f"DEBUG: Processando exclusão - callback_data: {callback_data}")
+                    parts = callback_data.split('_')
+                    logger.info(f"DEBUG: Split parts: {parts}")
+                    template_id_str = parts[-1]
+                    logger.info(f"DEBUG: Template ID string: '{template_id_str}'")
+                    template_id = int(template_id_str)
+                    logger.info(f"DEBUG: Template ID convertido: {template_id}")
+                    self.excluir_template(chat_id, template_id, message_id)
+                except Exception as e:
+                    logger.error(f"Erro ao processar exclusão de template: {e}")
+                    logger.error(f"Callback data: {callback_data}")
+                    self.send_message(chat_id, f"❌ Erro ao processar exclusão: {str(e)}")
             
             elif callback_data.startswith('template_enviar_'):
                 template_id = int(callback_data.split('_')[2])
@@ -2476,7 +2488,13 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
         except Exception as e:
             logger.error(f"Erro ao processar callback: {e}")
             logger.error(f"Callback data: {callback_data}")
-            self.send_message(chat_id, "❌ Erro ao processar ação.")
+            # Adicionar traceback para debug
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            
+            # Não mostrar erro para callbacks já tratados com try-catch específico
+            if not callback_data.startswith('confirmar_excluir_template_'):
+                self.send_message(chat_id, "❌ Erro ao processar ação.")
     
     def gerar_pix_pagamento(self, user_chat_id, callback_query_id=None):
         """Gera PIX para pagamento do usuário"""
@@ -4826,9 +4844,11 @@ Infraestrutura sólida, processos automatizados e base tecnológica para crescim
         """Menu de templates com interface interativa"""
         try:
             logger.info(f"Iniciando menu de templates para chat {chat_id}")
-            # CRÍTICO: Obter apenas templates do usuário para isolamento
-            templates = self.db.listar_templates(apenas_ativos=True, chat_id_usuario=chat_id) if self.db else []
-            logger.info(f"Templates encontrados: {len(templates)}")
+            # Obter templates do usuário + templates do sistema para visualização
+            templates_usuario = self.db.listar_templates(apenas_ativos=True, chat_id_usuario=chat_id) if self.db else []
+            templates_sistema = self.db.listar_templates(apenas_ativos=True, chat_id_usuario=None) if self.db else []
+            templates = templates_usuario + templates_sistema
+            logger.info(f"Templates encontrados: {len(templates)} (Usuário: {len(templates_usuario)}, Sistema: {len(templates_sistema)})")
             
             if not templates:
                 mensagem = """📄 *Templates de Mensagem*
@@ -4860,7 +4880,11 @@ Use o botão abaixo para criar seu primeiro template."""
                     'geral': '📝'
                 }.get(template.get('tipo', 'geral'), '📝')
                 
-                template_texto = f"{emoji_tipo} {template['nome']} ({template['uso_count']} usos)"
+                # ⚠️ EMOJI DE ATENÇÃO para templates do sistema
+                is_sistema = template.get('chat_id_usuario') is None
+                emoji_sistema = "⚠️ " if is_sistema else ""
+                
+                template_texto = f"{emoji_sistema}{emoji_tipo} {template['nome']} ({template['uso_count']} usos)"
                 inline_keyboard.append([{
                     'text': template_texto,
                     'callback_data': f"template_detalhes_{template['id']}"
@@ -4881,14 +4905,19 @@ Use o botão abaixo para criar seu primeiro template."""
             
             total_templates = len(templates)
             templates_ativos = len([t for t in templates if t.get('ativo', True)])
+            total_usuario = len(templates_usuario)
+            total_sistema = len(templates_sistema)
             
             mensagem = f"""📄 *Templates de Mensagem* ({total_templates})
 
 📊 *Status:*
 ✅ Ativos: {templates_ativos}
 ❌ Inativos: {total_templates - templates_ativos}
+👤 Seus templates: {total_usuario}
+⚠️ Templates do sistema: {total_sistema}
 
-💡 *Clique em um template para ver opções:*"""
+💡 *Clique em um template para ver opções:*
+⚠️ = Template padrão do sistema (não editável)"""
             
             logger.info(f"Enviando menu de templates com {len(inline_keyboard)} botões")
             self.send_message(chat_id, mensagem,
@@ -4904,8 +4933,11 @@ Use o botão abaixo para criar seu primeiro template."""
         """Mostra detalhes do template com opções de ação"""
         try:
             logger.info(f"Executando mostrar_detalhes_template: template_id={template_id}")
-            # CRÍTICO: Buscar apenas template do usuário para isolamento
+            # Buscar template (pode ser do usuário ou do sistema para visualização)
             template = self.db.obter_template(template_id, chat_id_usuario=chat_id) if self.db else None
+            if not template:
+                # Tentar buscar template do sistema
+                template = self.db.obter_template(template_id, chat_id_usuario=None) if self.db else None
             logger.info(f"Template encontrado: {template is not None}")
             if not template:
                 self.send_message(chat_id, "❌ Template não encontrado.")
@@ -4914,6 +4946,11 @@ Use o botão abaixo para criar seu primeiro template."""
             # Status emoji
             status_emoji = "✅" if template.get('ativo', True) else "❌"
             status_texto = "Ativo" if template.get('ativo', True) else "Inativo"
+            
+            # Verificar se é template do sistema
+            is_sistema = template.get('chat_id_usuario') is None
+            emoji_sistema = "⚠️ " if is_sistema else ""
+            tipo_texto = "SISTEMA" if is_sistema else "PERSONALIZADO"
             
             # Tipo emoji
             emoji_tipo = {
@@ -4931,8 +4968,9 @@ Use o botão abaixo para criar seu primeiro template."""
             # Escapar caracteres especiais do Markdown para evitar parse errors
             conteudo_safe = conteudo_preview.replace('*', '').replace('_', '').replace('`', '').replace('[', '').replace(']', '')
             
-            mensagem = f"""📄 *{template['nome']}*
+            mensagem = f"""📄 *{emoji_sistema}{template['nome']}*
 
+🏷️ *Categoria:* {tipo_texto}
 {emoji_tipo} *Tipo:* {template.get('tipo', 'geral').title()}
 {status_emoji} *Status:* {status_texto}
 📊 *Usado:* {template.get('uso_count', 0)} vezes
@@ -4943,21 +4981,35 @@ Use o botão abaixo para criar seu primeiro template."""
 
 🔧 *Ações disponíveis:*"""
             
-            # Botões de ação
-            inline_keyboard = [
-                [
-                    {'text': '✏️ Editar', 'callback_data': f'template_editar_{template_id}'},
-                    {'text': '📤 Enviar', 'callback_data': f'template_enviar_{template_id}'}
-                ],
-                [
-                    {'text': '🗑️ Excluir', 'callback_data': f'template_excluir_{template_id}'},
-                    {'text': '📊 Estatísticas', 'callback_data': f'template_info_{template_id}'}
-                ],
-                [
-                    {'text': '📋 Voltar à Lista', 'callback_data': 'voltar_templates'},
-                    {'text': '🔙 Menu Principal', 'callback_data': 'menu_principal'}
+            # Botões de ação (condicionais para templates do sistema)
+            if is_sistema:
+                # Templates do sistema - apenas visualização e envio
+                inline_keyboard = [
+                    [
+                        {'text': '📤 Enviar', 'callback_data': f'template_enviar_{template_id}'},
+                        {'text': '📊 Estatísticas', 'callback_data': f'template_info_{template_id}'}
+                    ],
+                    [
+                        {'text': '📋 Voltar à Lista', 'callback_data': 'voltar_templates'},
+                        {'text': '🔙 Menu Principal', 'callback_data': 'menu_principal'}
+                    ]
                 ]
-            ]
+            else:
+                # Templates do usuário - todas as ações
+                inline_keyboard = [
+                    [
+                        {'text': '✏️ Editar', 'callback_data': f'template_editar_{template_id}'},
+                        {'text': '📤 Enviar', 'callback_data': f'template_enviar_{template_id}'}
+                    ],
+                    [
+                        {'text': '🗑️ Excluir', 'callback_data': f'template_excluir_{template_id}'},
+                        {'text': '📊 Estatísticas', 'callback_data': f'template_info_{template_id}'}
+                    ],
+                    [
+                        {'text': '📋 Voltar à Lista', 'callback_data': 'voltar_templates'},
+                        {'text': '🔙 Menu Principal', 'callback_data': 'menu_principal'}
+                    ]
+                ]
             
             logger.info(f"Preparando envio: message_id={message_id}, chat_id={chat_id}")
             logger.info(f"Mensagem tamanho: {len(mensagem)} chars")
