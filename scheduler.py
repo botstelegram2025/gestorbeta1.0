@@ -175,10 +175,17 @@ class MessageScheduler:
                 self.db.marcar_mensagem_processada(mensagem['id'], True)
                 return
             
-            # Enviar mensagem via Baileys
+            # Enviar mensagem via Baileys - incluir chat_id_usuario obrigatório
+            chat_id_usuario = mensagem.get('chat_id_usuario') or cliente.get('chat_id_usuario')
+            if not chat_id_usuario:
+                logger.error(f"Mensagem ID {mensagem['id']} sem chat_id_usuario - não pode enviar WhatsApp")
+                self.db.marcar_mensagem_processada(mensagem['id'], False, "chat_id_usuario não encontrado")
+                return
+                
             resultado = self.baileys_api.send_message(
                 phone=mensagem['telefone'],
-                message=mensagem['mensagem']
+                message=mensagem['mensagem'],
+                chat_id_usuario=chat_id_usuario
             )
             
             if resultado['success']:
@@ -373,8 +380,13 @@ class MessageScheduler:
                 logger.info(f"Mensagem {tipo_template} já enviada hoje para {cliente['nome']}")
                 return False
             
-            # Enviar via WhatsApp
-            resultado = self.baileys_api.send_message(cliente['telefone'], mensagem)
+            # Enviar via WhatsApp - incluir chat_id_usuario obrigatório
+            chat_id_usuario = cliente.get('chat_id_usuario')
+            if not chat_id_usuario:
+                logger.error(f"Cliente {cliente['nome']} sem chat_id_usuario - não pode enviar WhatsApp")
+                return False
+                
+            resultado = self.baileys_api.send_message(cliente['telefone'], mensagem, chat_id_usuario)
             sucesso = resultado.get('success', False) if resultado else False
             
             if sucesso:

@@ -1183,6 +1183,9 @@ _Obrigado por escolher nossos serviços!_ ✨""",
                     cursor.execute(query, valores)
                     conn.commit()
                     
+                    # Invalidar cache para garantir que listas sejam atualizadas
+                    self.invalidate_cache("clientes")
+                    
                     return cursor.rowcount > 0
                     
         except Exception as e:

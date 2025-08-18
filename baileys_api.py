@@ -261,17 +261,19 @@ class BaileysAPI:
             if not clean_phone:
                 return {'success': False, 'error': 'Número de telefone inválido'}
             
-            # Preparar dados da mensagem (por enquanto sem sessão específica)
+            # Preparar dados da mensagem com sessão específica do usuário
+            session_name = self.get_user_session(chat_id_usuario)
             data = {
                 'number': clean_phone,
-                'message': message
+                'message': message,
+                'session_id': session_name  # Incluir sessionId específico
             }
             
             # Opções adicionais
             if options:
                 data.update(options)
             
-            # Enviar mensagem via endpoint padrão
+            # Enviar mensagem via endpoint multi-sessão
             response = requests.post(f"{self.base_url}/send-message", 
                                    json=data, timeout=30)
             
