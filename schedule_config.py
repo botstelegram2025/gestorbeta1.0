@@ -49,6 +49,9 @@ class ScheduleConfig:
                     {'text': '📊 Status Jobs', 'callback_data': 'status_jobs'}
                 ],
                 [
+                    {'text': '🔄 Reset para Padrão', 'callback_data': 'reset_horarios_padrao'}
+                ],
+                [
                     {'text': '🔙 Voltar', 'callback_data': 'voltar_configs'},
                     {'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}
                 ]
@@ -338,6 +341,77 @@ Esta limpeza remove mensagens antigas da fila que não foram enviadas.
             logger.error(f"Erro ao recriar jobs: {e}")
             self.bot.send_message(chat_id, f"❌ Erro ao recriar jobs: {str(e)}")
     
+    def resetar_horarios_padrao(self, chat_id):
+        """Reseta todos os horários para os padrões do sistema"""
+        try:
+            # Horários padrão do sistema
+            horarios_padrao = {
+                'horario_envio_diario': '09:00',
+                'horario_verificacao_diaria': '09:00', 
+                'horario_limpeza_fila': '02:00',
+                'timezone_sistema': 'America/Sao_Paulo'
+            }
+            
+            # Salvar configurações padrão ISOLADAS POR USUÁRIO
+            for config_key, valor_padrao in horarios_padrao.items():
+                if self.bot.db:
+                    # CRÍTICO: Isolamento por usuário - cada usuário tem suas próprias configurações
+                    self.bot.db.salvar_configuracao(config_key, valor_padrao, chat_id_usuario=chat_id)
+            
+            # Recriar jobs com os novos horários
+            if hasattr(self.bot, 'scheduler') and self.bot.scheduler:
+                # Parar scheduler atual
+                if self.bot.scheduler.running:
+                    self.bot.scheduler.scheduler.shutdown(wait=True)
+                    self.bot.scheduler.running = False
+                
+                # Reiniciar com configurações padrão - incluir template_manager
+                from scheduler import MessageScheduler
+                self.bot.scheduler = MessageScheduler(
+                    self.bot.db, 
+                    self.bot, 
+                    template_manager=getattr(self.bot, 'template_manager', None)
+                )
+                logger.info(f"Jobs recriados com horários padrão para usuário {chat_id}")
+            
+            mensagem = f"""✅ SEUS HORÁRIOS FORAM RESETADOS!
+
+🔄 Seus novos horários aplicados:
+🕘 Envio Diário: 09:00
+   └ Suas mensagens enviadas automaticamente
+
+🕔 Verificação: 09:00  
+   └ Verificação dos seus clientes diária
+
+🕚 Limpeza: 02:00
+   └ Limpeza da sua fila de mensagens
+
+🌍 Timezone: America/Sao_Paulo
+
+⚡ Status: Jobs recriados automaticamente
+📝 Efeito: Imediato - já operacional
+🔒 Isolamento: Configurações aplicadas apenas à sua conta
+
+💡 Nota: Estes são os horários padrão otimizados do sistema.
+👤 Usuário: {chat_id} - configurações isoladas"""
+
+            inline_keyboard = [
+                [
+                    {'text': '📊 Verificar Status', 'callback_data': 'status_jobs'},
+                    {'text': '⏰ Menu Horários', 'callback_data': 'config_horarios'}
+                ],
+                [
+                    {'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}
+                ]
+            ]
+
+            self.bot.send_message(chat_id, mensagem, 
+                                reply_markup={'inline_keyboard': inline_keyboard})
+
+        except Exception as e:
+            logger.error(f"Erro ao resetar horários padrão: {e}")
+            self.bot.send_message(chat_id, f"❌ Erro ao resetar horários: {str(e)}")
+
     def limpar_duplicatas(self, chat_id):
         """Remove jobs duplicados deixando apenas os únicos necessários"""
         try:

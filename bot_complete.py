@@ -1981,6 +1981,9 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
             elif callback_data == 'status_jobs':
                 self.schedule_config.status_jobs(chat_id)
             
+            elif callback_data == 'reset_horarios_padrao':
+                self.schedule_config.resetar_horarios_padrao(chat_id)
+            
             # Callbacks de configuração
             elif callback_data == 'config_empresa':
                 self.config_empresa(chat_id)
@@ -2857,6 +2860,9 @@ Escolha uma das opções abaixo:"""
             # Atualizar no banco
             self.db.atualizar_vencimento_cliente(cliente_id, novo_vencimento)
             
+            # CRÍTICO: Log da renovação para confirmação
+            logger.info(f"Renovação processada - cliente {cliente['nome']} vencimento atualizado de {vencimento_atual} para {novo_vencimento}")
+            
             # CANCELAR AUTOMATICAMENTE MENSAGENS PENDENTES NA FILA
             mensagens_canceladas = 0
             if self.scheduler:
@@ -2936,6 +2942,9 @@ Escolha uma das opções abaixo:"""
             
             # Atualizar no banco
             self.db.atualizar_vencimento_cliente(cliente_id, novo_vencimento)
+            
+            # CRÍTICO: Log da renovação para confirmação
+            logger.info(f"Renovação 30 dias processada - cliente {cliente['nome']} vencimento atualizado de {vencimento_atual} para {novo_vencimento}")
             
             # CANCELAR AUTOMATICAMENTE MENSAGENS PENDENTES NA FILA
             mensagens_canceladas = 0
@@ -3065,6 +3074,9 @@ Exemplo: 15/10/2025"""
             
             # Atualizar no banco
             self.db.atualizar_vencimento_cliente(cliente_id, nova_data)
+            
+            # CRÍTICO: Log da renovação com nova data para confirmação
+            logger.info(f"Renovação nova data processada - cliente {cliente_nome} vencimento atualizado para {nova_data}")
             
             # CANCELAR AUTOMATICAMENTE MENSAGENS PENDENTES NA FILA
             mensagens_canceladas = 0

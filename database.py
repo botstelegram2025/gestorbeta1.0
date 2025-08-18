@@ -1012,6 +1012,10 @@ _Obrigado por escolher nossos serviços!_ ✨""",
                         raise ValueError("Cliente não encontrado ou inativo")
                     
                     conn.commit()
+                    
+                    # CRÍTICO: Invalidar cache da lista de clientes para atualização imediata
+                    self.invalidate_cache('clientes_')
+                    logger.info(f"Cache de clientes invalidado após renovação")
                     logger.info(f"Vencimento atualizado para cliente ID {cliente_id}: {novo_vencimento}")
                     
         except Exception as e:
