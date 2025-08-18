@@ -1440,9 +1440,9 @@ _Obrigado por escolher nossos serviços!_ ✨""",
             logger.error(f"Erro ao obter template por tipo: {e}")
             raise
     
-    def buscar_template_por_id(self, template_id):
+    def buscar_template_por_id(self, template_id, chat_id_usuario=None):
         """Busca template por ID (alias para compatibilidade)"""
-        return self.obter_template(template_id)
+        return self.obter_template(template_id, chat_id_usuario)
     
     def excluir_template(self, template_id):
         """Exclui template definitivamente"""

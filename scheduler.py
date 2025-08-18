@@ -240,8 +240,8 @@ class MessageScheduler:
             # 1. VERIFICAR USUÁRIOS DO SISTEMA (teste/renovação)
             self._verificar_usuarios_sistema(amanha)
             
-            # 2. PROCESSAR CLIENTES (mensagens WhatsApp)
-            clientes = self.db.listar_clientes(apenas_ativos=True)
+            # 2. PROCESSAR CLIENTES (mensagens WhatsApp) - TODOS OS USUÁRIOS
+            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None)
             
             if not clientes:
                 logger.info("Nenhum cliente ativo encontrado")
@@ -302,8 +302,8 @@ class MessageScheduler:
             logger.info("=== PROCESSAMENTO FORÇADO DE TODOS OS VENCIDOS ===")
             logger.info("Enviando mensagens para todos os clientes vencidos...")
             
-            # Buscar clientes ativos
-            clientes = self.db.listar_clientes(apenas_ativos=True)
+            # Buscar clientes ativos - TODOS OS USUÁRIOS para processamento geral
+            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None)
             
             if not clientes:
                 logger.info("Nenhum cliente ativo encontrado")
@@ -322,7 +322,7 @@ class MessageScheduler:
                         dias_vencido = abs(dias_vencimento)
                         
                         # Verificar se já foi enviada hoje (evitar duplicatas)
-                        template = self.db.obter_template_por_tipo('vencimento_1dia_apos')
+                        template = self.db.obter_template_por_tipo('vencimento_1dia_apos', cliente.get('chat_id_usuario'))
                         if template and not forcar_reprocesso:
                             if self._ja_enviada_hoje(cliente['id'], template['id']):
                                 logger.info(f"⏭️  {cliente['nome']} - mensagem já enviada hoje")
@@ -366,10 +366,10 @@ class MessageScheduler:
                 logger.info(f"Cliente {cliente['nome']} optou por não receber mensagens do tipo {tipo_template}")
                 return False
             
-            # Buscar template correspondente
-            template = self.db.obter_template_por_tipo(tipo_template)
+            # Buscar template correspondente com isolamento por usuário
+            template = self.db.obter_template_por_tipo(tipo_template, chat_id_usuario)
             if not template:
-                logger.warning(f"Template {tipo_template} não encontrado")
+                logger.warning(f"Template {tipo_template} não encontrado para usuário {chat_id_usuario}")
                 return False
             
             # Processar template com dados do cliente
@@ -397,7 +397,8 @@ class MessageScheduler:
                     telefone=cliente['telefone'],
                     mensagem=mensagem,
                     tipo_envio='automatico',
-                    sucesso=True
+                    sucesso=True,
+                    chat_id_usuario=chat_id_usuario
                 )
                 return True
             else:

@@ -5181,6 +5181,15 @@ Deseja {status_texto.lower()} este template?"""
                 self.send_message(chat_id, "❌ Template não encontrado.")
                 return
             
+            # VERIFICAR SE É TEMPLATE PADRÃO DO SISTEMA (não pode ser editado)
+            if template.get('chat_id_usuario') is None:
+                self.send_message(chat_id, 
+                    "❌ *Template padrão do sistema*\n\n"
+                    "Os templates padrão não podem ser editados diretamente. "
+                    "Você pode criar uma cópia personalizada ou usar a opção de modelos.",
+                    parse_mode='Markdown')
+                return
+            
             # Armazenar estado de edição
             self.conversation_states[chat_id] = {
                 'action': 'editar_template',
