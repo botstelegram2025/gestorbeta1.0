@@ -3180,8 +3180,8 @@ Exemplo: 15/10/2025"""
                 self.send_message(chat_id, "❌ Cliente não encontrado.")
                 return
             
-            # Buscar template
-            template = self.template_manager.buscar_template_por_id(template_id)
+            # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id)
             if not template:
                 self.send_message(chat_id, "❌ Template não encontrado.")
                 return
@@ -4844,11 +4844,9 @@ Infraestrutura sólida, processos automatizados e base tecnológica para crescim
         """Menu de templates com interface interativa"""
         try:
             logger.info(f"Iniciando menu de templates para chat {chat_id}")
-            # Obter templates do usuário + templates do sistema para visualização
-            templates_usuario = self.db.listar_templates(apenas_ativos=True, chat_id_usuario=chat_id) if self.db else []
-            templates_sistema = self.db.listar_templates(apenas_ativos=True, chat_id_usuario=None) if self.db else []
-            templates = templates_usuario + templates_sistema
-            logger.info(f"Templates encontrados: {len(templates)} (Usuário: {len(templates_usuario)}, Sistema: {len(templates_sistema)})")
+            # CORREÇÃO CRÍTICA: Obter APENAS templates do usuário para isolamento total
+            templates = self.db.listar_templates(apenas_ativos=True, chat_id_usuario=chat_id) if self.db else []
+            logger.info(f"Templates encontrados: {len(templates)} (isolamento por usuário ativo)")
             
             if not templates:
                 mensagem = """📄 *Templates de Mensagem*
@@ -4880,11 +4878,8 @@ Use o botão abaixo para criar seu primeiro template."""
                     'geral': '📝'
                 }.get(template.get('tipo', 'geral'), '📝')
                 
-                # ⚠️ EMOJI DE ATENÇÃO para templates do sistema
-                is_sistema = template.get('chat_id_usuario') is None
-                emoji_sistema = "⚠️ " if is_sistema else ""
-                
-                template_texto = f"{emoji_sistema}{emoji_tipo} {template['nome']} ({template['uso_count']} usos)"
+                # Apenas templates do usuário - sem emoji de sistema
+                template_texto = f"{emoji_tipo} {template['nome']} ({template['uso_count']} usos)"
                 inline_keyboard.append([{
                     'text': template_texto,
                     'callback_data': f"template_detalhes_{template['id']}"
@@ -4905,19 +4900,14 @@ Use o botão abaixo para criar seu primeiro template."""
             
             total_templates = len(templates)
             templates_ativos = len([t for t in templates if t.get('ativo', True)])
-            total_usuario = len(templates_usuario)
-            total_sistema = len(templates_sistema)
             
-            mensagem = f"""📄 *Templates de Mensagem* ({total_templates})
+            mensagem = f"""📄 *Seus Templates de Mensagem* ({total_templates})
 
 📊 *Status:*
 ✅ Ativos: {templates_ativos}
 ❌ Inativos: {total_templates - templates_ativos}
-👤 Seus templates: {total_usuario}
-⚠️ Templates do sistema: {total_sistema}
 
-💡 *Clique em um template para ver opções:*
-⚠️ = Template padrão do sistema (não editável)"""
+💡 *Clique em um template para ver opções:*"""
             
             logger.info(f"Enviando menu de templates com {len(inline_keyboard)} botões")
             self.send_message(chat_id, mensagem,
@@ -5063,7 +5053,8 @@ Use o botão abaixo para criar seu primeiro template."""
     def iniciar_edicao_template_campo(self, chat_id, template_id, campo):
         """Inicia edição de um campo específico do template"""
         try:
-            template = self.template_manager.buscar_template_por_id(template_id) if self.template_manager else None
+            # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id) if self.template_manager else None
             if not template:
                 self.send_message(chat_id, "❌ Template não encontrado.")
                 return
@@ -5260,7 +5251,8 @@ Deseja {status_texto.lower()} este template?"""
     def editar_template(self, chat_id, template_id):
         """Inicia edição de template"""
         try:
-            template = self.template_manager.buscar_template_por_id(template_id) if self.template_manager else None
+            # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id) if self.template_manager else None
             if not template:
                 self.send_message(chat_id, "❌ Template não encontrado.")
                 return
@@ -5401,16 +5393,14 @@ Deseja realmente excluir este template?"""
     def selecionar_cliente_template(self, chat_id, template_id):
         """Seleciona cliente para enviar template"""
         try:
-            template = self.template_manager.buscar_template_por_id(template_id) if self.template_manager else None
+            # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id) if self.template_manager else None
             if not template:
                 self.send_message(chat_id, "❌ Template não encontrado.")
                 return
             
-            # Filtrar por usuário - admin vê todos, usuário comum vê apenas seus
-            if self.is_admin(chat_id):
-                clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None) if self.db else []
-            else:
-                clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id) if self.db else []
+            # CORREÇÃO CRÍTICA: Isolamento total por usuário - apenas clientes do próprio usuário
+            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id) if self.db else []
             
             if not clientes:
                 self.send_message(chat_id,
@@ -10624,7 +10614,9 @@ Confirma o envio da cobrança geral?"""
         """Busca template por ID com fallback para Railway"""
         try:
             if self.template_manager and hasattr(self.template_manager, 'buscar_template_por_id'):
-                return self.template_manager.buscar_template_por_id(template_id)
+                # CORREÇÃO CRÍTICA: Usar isolamento por usuário em Railway
+                chat_id = getattr(self, 'last_chat_id', None)
+                return self.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id)
             elif self.template_manager and hasattr(self.template_manager, 'get_template_by_id'):
                 return self.template_manager.get_template_by_id(template_id)
             else:
@@ -11221,9 +11213,9 @@ def enviar_template_para_cliente_global(chat_id, cliente_id, template_id):
             telegram_bot.send_message(chat_id, "❌ Cliente não encontrado.")
             return
         
-        # Buscar template  
+        # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
         logger.info(f"Buscando template {template_id}...")
-        template = telegram_bot.template_manager.buscar_template_por_id(template_id)
+        template = telegram_bot.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id)
         if not template:
             logger.error(f"Template {template_id} não encontrado")
             telegram_bot.send_message(chat_id, "❌ Template não encontrado.")
@@ -11287,7 +11279,8 @@ def confirmar_envio_mensagem_global(chat_id, cliente_id, template_id):
         # Buscar cliente e template
         logger.info(f"Buscando cliente {cliente_id} e template {template_id}...")
         cliente = telegram_bot.db.buscar_cliente_por_id(cliente_id)
-        template = telegram_bot.template_manager.buscar_template_por_id(template_id)
+        # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
+        template = telegram_bot.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id)
         
         if not cliente or not template:
             logger.error(f"Cliente {cliente_id} ou template {template_id} não encontrado")
