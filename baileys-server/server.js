@@ -34,15 +34,25 @@ const saveSessionToDatabase = async (sessionId) => {
 
         // Salvar no banco via API Python com ID da sessão
         if (Object.keys(sessionData).length > 0) {
-            await fetch('http://localhost:5000/api/session/backup', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    session_data: sessionData,
-                    session_id: sessionId
-                })
-            });
-            console.log(`💾 Sessão ${sessionId} salva no banco de dados`);
+            try {
+                const response = await fetch('http://localhost:5000/api/session/backup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        session_data: sessionData,
+                        session_id: sessionId
+                    }),
+                    timeout: 5000
+                });
+                
+                if (response.ok) {
+                    console.log(`💾 Sessão ${sessionId} salva no banco de dados`);
+                } else {
+                    console.log(`⚠️ Falha ao salvar sessão ${sessionId}: ${response.status}`);
+                }
+            } catch (fetchError) {
+                console.log(`⚠️ Erro de rede ao salvar sessão ${sessionId}:`, fetchError.message);
+            }
         }
     } catch (error) {
         console.log(`⚠️ Erro ao salvar sessão ${sessionId}:`, error.message);
@@ -134,7 +144,11 @@ const connectToWhatsApp = async (sessionId) => {
         session.sock = sock;
 
         // Salvar credenciais quando necessário
-        sock.ev.on('creds.update', saveCreds);
+        sock.ev.on('creds.update', async () => {
+            await saveCreds();
+            // Backup automático a cada atualização de credenciais
+            await saveSessionToDatabase(sessionId);
+        });
 
         // Gerenciar conexão específica por sessão
         sock.ev.on('connection.update', (update) => {
@@ -536,6 +550,36 @@ app.get('/qr', async (req, res) => {
     }
 });
 
+// Auto-restaurar sessões salvas no banco ao inicializar
+const autoRestoreSessions = async () => {
+    try {
+        console.log('🔄 Verificando sessões salvas no banco...');
+        const response = await fetch('http://localhost:5000/api/session/list');
+        if (response.ok) {
+            const { sessions: savedSessions } = await response.json();
+            
+            if (savedSessions && savedSessions.length > 0) {
+                console.log(`🗂️  Encontradas ${savedSessions.length} sessões salvas`);
+                
+                for (const sessionInfo of savedSessions) {
+                    const sessionId = sessionInfo.session_id;
+                    console.log(`🔄 Restaurando sessão: ${sessionId}`);
+                    
+                    // Restaurar e conectar automaticamente
+                    setTimeout(() => {
+                        connectToWhatsApp(sessionId);
+                    }, 2000 * savedSessions.indexOf(sessionInfo)); // Espaçar as conexões
+                }
+            } else {
+                console.log('📭 Nenhuma sessão salva encontrada');
+            }
+        }
+    } catch (error) {
+        console.log('⚠️ Erro ao auto-restaurar sessões:', error.message);
+        console.log('ℹ️  API Python pode não estar pronta ainda');
+    }
+};
+
 // Inicializar servidor
 app.listen(PORT, () => {
     console.log('🚀 Baileys API rodando na porta', PORT);
@@ -553,4 +597,7 @@ app.listen(PORT, () => {
     console.log('🔥 CADA USUÁRIO DEVE TER SUA PRÓPRIA SESSÃO!');
     console.log('   Exemplo: /qr/user_1460561546');
     console.log('   Exemplo: /status/user_987654321');
+    
+    // Auto-restaurar sessões após 5 segundos (aguardar API Python)
+    setTimeout(autoRestoreSessions, 5000);
 });

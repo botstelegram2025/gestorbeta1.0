@@ -13,6 +13,8 @@ Button display format: Client buttons throughout the system display "name + expi
 Phone number format: All phone numbers are automatically standardized to Baileys WhatsApp format (DDD12345678 - 10 digits total) regardless of input format. Modern 9-digit numbers have the first 9 removed for Baileys compatibility.
 Renewal behavior: When renewing clients, system now asks if user wants to send renewal message. Date calculation fixed to maintain same day of next month (e.g., Aug 15 -> Sep 15) instead of adding exactly 30 days.
 Cache behavior: Client list updates immediately after any edit operation. System automatically invalidates cache when client data is modified to ensure real-time data display.
+Template protection: System templates (chat_id_usuario = NULL) cannot be edited by users. Only custom user templates can be modified.
+User validation: Automatic messages only sent when valid chat_id_usuario is present, preventing orphaned messages.
 
 ## System Architecture
 

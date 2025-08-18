@@ -194,6 +194,32 @@ def restore_session():
         logger.error(f"Erro ao restaurar sessão: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@session_api.route('/api/session/list', methods=['GET'])
+def list_sessions():
+    """Lista todas as sessões salvas no banco"""
+    try:
+        with DatabaseManager() as db:
+            with db.get_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                    cursor.execute("""
+                        SELECT DISTINCT session_id, numero_whatsapp, updated_at, chat_id_usuario
+                        FROM whatsapp_sessions 
+                        ORDER BY updated_at DESC
+                    """)
+                    
+                    sessions = cursor.fetchall()
+                    sessions_list = [dict(session) for session in sessions]
+                    
+                    return jsonify({
+                        'success': True,
+                        'sessions': sessions_list,
+                        'total': len(sessions_list)
+                    })
+        
+    except Exception as e:
+        logger.error(f"Erro ao listar sessões: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @session_api.route('/api/session/delete', methods=['DELETE'])
 def delete_session():
     """Endpoint para deletar sessão"""
