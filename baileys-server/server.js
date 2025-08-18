@@ -12,9 +12,8 @@ const PORT = 3000;
 app.use(cors());
 app.use(express.json());
 
-// Estado global para múltiplas sessões
+// Estado global para múltiplas sessões - CADA USUÁRIO TEM SUA PRÓPRIA SESSÃO
 const sessions = new Map(); // sessionId -> { sock, qrCode, isConnected, status, backupInterval }
-let defaultSessionId = 'default';
 
 // Sistema de backup da sessão para PostgreSQL (por sessão específica)
 const saveSessionToDatabase = async (sessionId) => {
@@ -79,47 +78,67 @@ const restoreSessionFromDatabase = async (sessionId) => {
 };
 
 // Função para conectar ao WhatsApp (por sessão específica)
-async function connectToWhatsApp(sessionId = defaultSessionId) {
+const connectToWhatsApp = async (sessionId) => {
     try {
         console.log(`🔄 Iniciando conexão com WhatsApp para sessão ${sessionId}...`);
         
-        // Criar ou obter dados da sessão
+        // Garantir que a pasta auth existe para essa sessão específica
+        const authPath = `./auth_info_${sessionId}`;
+        if (!fs.existsSync(authPath)) {
+            fs.mkdirSync(authPath, { recursive: true });
+        }
+
+        // Tentar restaurar sessão do banco primeiro
+        await restoreSessionFromDatabase(sessionId);
+
+        // Configurar autenticação multi-arquivo específica da sessão
+        const { state, saveCreds } = await useMultiFileAuthState(authPath);
+        
+        // Criar socket específico para essa sessão
+        const sock = makeWASocket({
+            auth: state,
+            printQRInTerminal: false,
+            logger: {
+                level: 'silent',
+                info: () => {},
+                error: () => {},
+                warn: () => {},
+                debug: () => {},
+                trace: () => {},
+                child: () => ({ 
+                    level: 'silent',
+                    info: () => {},
+                    error: () => {},
+                    warn: () => {},
+                    debug: () => {},
+                    trace: () => {}
+                })
+            },
+            browser: ['Ubuntu', 'Chrome', '22.04.4'],
+            connectTimeoutMs: 30000,
+            defaultQueryTimeoutMs: 30000
+        });
+
+        // Inicializar objeto de sessão
         if (!sessions.has(sessionId)) {
             sessions.set(sessionId, {
                 sock: null,
                 qrCode: '',
                 isConnected: false,
-                status: 'disconnected',
+                status: 'initializing',
                 backupInterval: null
             });
         }
         
         const session = sessions.get(sessionId);
-        
-        // Primeiro tentar restaurar sessão do banco
-        await restoreSessionFromDatabase(sessionId);
-        
-        const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${sessionId}`);
-        
-        session.sock = makeWASocket({
-            auth: state,
-            printQRInTerminal: false
-        });
+        session.sock = sock;
 
-        // Salvar credenciais e backup automático
-        session.sock.ev.on('creds.update', async () => {
-            await saveCreds();
-            // Fazer backup imediato a cada update das credenciais
-            setTimeout(() => saveSessionToDatabase(sessionId), 1000);
-        });
-        
-        // Monitorar conexão
-        session.sock.ev.on('connection.update', (update) => {
+        // Salvar credenciais quando necessário
+        sock.ev.on('creds.update', saveCreds);
+
+        // Gerenciar conexão específica por sessão
+        sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
-            
-            if (connection !== session.status) {
-                console.log(`📱 Sessão ${sessionId} - Status:`, connection);
-            }
             
             if (qr) {
                 console.log(`📱 QR Code gerado para sessão ${sessionId}!`);
@@ -164,21 +183,6 @@ async function connectToWhatsApp(sessionId = defaultSessionId) {
                     session.status = 'connecting';
                     console.log(`🔄 Sessão ${sessionId} - Conectando...`);
                 }
-            } else if (connection === 'close') {
-                const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-                session.isConnected = false;
-                session.status = 'close';
-                session.qrCode = '';
-                
-                console.log(`🔌 Sessão ${sessionId} - Conexão fechada. Reconectar? ${shouldReconnect}`);
-                
-                if (shouldReconnect) {
-                    // Aguardar 3 segundos antes de reconectar
-                    setTimeout(() => {
-                        console.log(`🔄 Reconectando sessão ${sessionId} automaticamente...`);
-                        connectToWhatsApp(sessionId);
-                    }, 3000);
-                }
             }
         });
 
@@ -191,11 +195,22 @@ async function connectToWhatsApp(sessionId = defaultSessionId) {
     }
 }
 
-// Endpoints da API
+// Endpoints da API - TODOS REQUEREM sessionId ESPECÍFICO
 
-// Status da API (com suporte a sessões específicas)
+// Status da API - OBRIGATÓRIO sessionId
 app.get('/status/:sessionId', (req, res) => {
-    const sessionId = req.params.sessionId || defaultSessionId;
+    const sessionId = req.params.sessionId;
+    
+    if (!sessionId) {
+        return res.status(400).json({
+            connected: false,
+            status: 'error',
+            error: 'sessionId é obrigatório',
+            qr_available: false,
+            timestamp: new Date().toISOString()
+        });
+    }
+    
     const session = sessions.get(sessionId);
     
     if (!session) {
@@ -219,84 +234,24 @@ app.get('/status/:sessionId', (req, res) => {
     });
 });
 
-// Endpoints de compatibilidade sem parâmetros obrigatórios
-app.get('/status', (req, res) => {
-    const sessionId = req.query.sessionId || defaultSessionId;
-    const session = sessions.get(sessionId);
-    
-    if (!session) {
-        return res.json({
-            connected: false,
-            status: 'not_initialized',
-            session: null,
-            qr_available: false,
-            timestamp: new Date().toISOString(),
-            session_id: sessionId
-        });
-    }
-    
-    res.json({
-        connected: session.isConnected,
-        status: session.status,
-        session: session.sock?.user?.id || null,
-        qr_available: session.qrCode !== '',
-        timestamp: new Date().toISOString(),
-        session_id: sessionId
-    });
-});
-
-app.get('/qr', async (req, res) => {
-    try {
-        const sessionId = req.query.sessionId || defaultSessionId;
-        
-        // Inicializar sessão se não existir
-        if (!sessions.has(sessionId)) {
-            await connectToWhatsApp(sessionId);
-            // Aguardar um pouco para QR ser gerado
-            await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-        
-        const session = sessions.get(sessionId);
-        
-        if (!session || !session.qrCode) {
-            return res.status(404).json({ 
-                success: false, 
-                error: `QR Code não disponível para sessão ${sessionId}. Tente reconectar.`,
-                session_id: sessionId
-            });
-        }
-
-        // Gerar imagem QR Code
-        const qrImage = await QRCode.toDataURL(session.qrCode);
-        
-        res.json({
-            success: true,
-            qr: session.qrCode,
-            qr_image: qrImage,
-            instructions: 'Abra WhatsApp → Configurações → Aparelhos conectados → Conectar um aparelho',
-            session_id: sessionId
-        });
-        
-    } catch (error) {
-        console.error('❌ Erro ao gerar QR:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: 'Erro ao gerar QR Code',
-            session_id: req.query.sessionId || defaultSessionId
-        });
-    }
-});
-
-// Obter QR Code (com suporte a sessões específicas)
+// QR Code - OBRIGATÓRIO sessionId  
 app.get('/qr/:sessionId', async (req, res) => {
     try {
-        const sessionId = req.params.sessionId || defaultSessionId;
+        const sessionId = req.params.sessionId;
+        
+        if (!sessionId) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'sessionId é obrigatório',
+                session_id: null
+            });
+        }
         
         // Inicializar sessão se não existir
         if (!sessions.has(sessionId)) {
             await connectToWhatsApp(sessionId);
             // Aguardar um pouco para QR ser gerado
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await new Promise(resolve => setTimeout(resolve, 3000));
         }
         
         const session = sessions.get(sessionId);
@@ -325,16 +280,22 @@ app.get('/qr/:sessionId', async (req, res) => {
         res.status(500).json({ 
             success: false, 
             error: 'Erro ao gerar QR Code',
-            session_id: req.params.sessionId || defaultSessionId
+            session_id: req.params.sessionId
         });
     }
 });
 
-// Enviar mensagem (com suporte a sessões específicas)
+// Enviar mensagem - OBRIGATÓRIO session_id
 app.post('/send-message', async (req, res) => {
     try {
         const { number, message, session_id } = req.body;
-        const sessionId = session_id || defaultSessionId;
+        
+        if (!session_id) {
+            return res.status(400).json({
+                success: false,
+                error: 'session_id é obrigatório'
+            });
+        }
         
         if (!number || !message) {
             return res.status(400).json({
@@ -343,13 +304,13 @@ app.post('/send-message', async (req, res) => {
             });
         }
         
-        const session = sessions.get(sessionId);
+        const session = sessions.get(session_id);
         
         if (!session || !session.isConnected) {
             return res.status(400).json({
                 success: false,
-                error: `WhatsApp não conectado para sessão ${sessionId}`,
-                session_id: sessionId
+                error: `WhatsApp não conectado para sessão ${session_id}`,
+                session_id: session_id
             });
         }
         
@@ -359,29 +320,37 @@ app.post('/send-message', async (req, res) => {
         // Enviar mensagem
         const result = await session.sock.sendMessage(jid, { text: message });
         
-        console.log(`✅ Mensagem enviada via sessão ${sessionId}:`, number, message.substring(0, 50) + '...');
+        console.log(`✅ Mensagem enviada via sessão ${session_id}:`, number, message.substring(0, 50) + '...');
         
         res.json({
             success: true,
             messageId: result.key.id,
             timestamp: new Date().toISOString(),
-            session_id: sessionId
+            session_id: session_id
         });
         
     } catch (error) {
-        console.error(`❌ Erro ao enviar mensagem via sessão ${sessionId}:`, error);
+        console.error(`❌ Erro ao enviar mensagem:`, error);
         res.status(500).json({
             success: false,
             error: error.message,
-            session_id: sessionId
+            session_id: req.body.session_id || null
         });
     }
 });
 
-// Reconectar (com suporte a sessões específicas)
+// Reconectar sessão específica
 app.post('/reconnect/:sessionId', async (req, res) => {
     try {
-        const sessionId = req.params.sessionId || defaultSessionId;
+        const sessionId = req.params.sessionId;
+        
+        if (!sessionId) {
+            return res.status(400).json({
+                success: false,
+                error: 'sessionId é obrigatório'
+            });
+        }
+        
         console.log(`🔄 Reconectando sessão ${sessionId}...`);
         
         // Limpar sessão existente
@@ -406,11 +375,11 @@ app.post('/reconnect/:sessionId', async (req, res) => {
         });
         
     } catch (error) {
-        console.error(`❌ Erro ao reconectar sessão ${sessionId}:`, error);
+        console.error(`❌ Erro ao reconectar sessão:`, error);
         res.status(500).json({
             success: false,
             error: error.message,
-            session_id: sessionId
+            session_id: req.params.sessionId
         });
     }
 });
@@ -418,9 +387,18 @@ app.post('/reconnect/:sessionId', async (req, res) => {
 // Limpar sessão específica
 app.post('/clear-session/:sessionId', async (req, res) => {
     try {
-        const sessionId = req.params.sessionId || defaultSessionId;
+        const sessionId = req.params.sessionId;
+        
+        if (!sessionId) {
+            return res.status(400).json({
+                success: false,
+                error: 'sessionId é obrigatório'
+            });
+        }
+        
         console.log(`🧹 Limpando sessão ${sessionId}...`);
         
+        // Limpar sessão da memória
         if (sessions.has(sessionId)) {
             const session = sessions.get(sessionId);
             if (session.sock) {
@@ -445,48 +423,11 @@ app.post('/clear-session/:sessionId', async (req, res) => {
         });
         
     } catch (error) {
-        console.error(`❌ Erro ao limpar sessão ${sessionId}:`, error);
+        console.error(`❌ Erro ao limpar sessão:`, error);
         res.status(500).json({
             success: false,
             error: error.message,
-            session_id: sessionId
-        });
-    }
-});
-
-// Endpoint de reconectar compatível
-app.post('/reconnect', async (req, res) => {
-    try {
-        const sessionId = req.body.sessionId || req.query.sessionId || defaultSessionId;
-        console.log(`🔄 Reconectando sessão ${sessionId}...`);
-        
-        // Limpar sessão existente
-        if (sessions.has(sessionId)) {
-            const session = sessions.get(sessionId);
-            if (session.sock) {
-                session.sock.end();
-            }
-            if (session.backupInterval) {
-                clearInterval(session.backupInterval);
-            }
-            sessions.delete(sessionId);
-        }
-        
-        // Iniciar nova conexão
-        setTimeout(() => connectToWhatsApp(sessionId), 1000);
-        
-        res.json({
-            success: true,
-            message: `Reconexão iniciada para sessão ${sessionId}`,
-            session_id: sessionId
-        });
-        
-    } catch (error) {
-        console.error(`❌ Erro ao reconectar sessão ${sessionId}:`, error);
-        res.status(500).json({
-            success: false,
-            error: error.message,
-            session_id: sessionId
+            session_id: req.params.sessionId
         });
     }
 });
@@ -523,24 +464,83 @@ app.get('/sessions', (req, res) => {
     }
 });
 
-// Health check
-app.get('/', (req, res) => {
-    res.json({
-        service: 'Baileys API Multi-Session',
-        status: 'running',
-        total_sessions: sessions.size,
-        timestamp: new Date().toISOString()
-    });
+// ENDPOINTS DE COMPATIBILIDADE COM QUERY PARAMETERS
+app.get('/status', (req, res) => {
+    const sessionId = req.query.sessionId;
+    
+    if (!sessionId) {
+        return res.status(400).json({
+            connected: false,
+            status: 'error',
+            error: 'sessionId é obrigatório no query parameter (?sessionId=user_123)',
+            qr_available: false,
+            timestamp: new Date().toISOString()
+        });
+    }
+    
+    // Redirecionar para endpoint específico
+    req.params.sessionId = sessionId;
+    return app._router.handle(req, res);
 });
 
-// Iniciar servidor
-app.listen(PORT, () => {
-    console.log(`🚀 Baileys API rodando na porta ${PORT}`);
-    console.log(`📱 Status: http://localhost:${PORT}/status`);
-    console.log(`🔗 QR Code: http://localhost:${PORT}/qr`);
-    console.log('');
+app.get('/qr', async (req, res) => {
+    const sessionId = req.query.sessionId;
     
-    // Inicializar sistema multi-sessão
+    if (!sessionId) {
+        return res.status(400).json({ 
+            success: false, 
+            error: 'sessionId é obrigatório no query parameter (?sessionId=user_123)'
+        });
+    }
+    
+    // Redirecionar para endpoint específico
+    req.params.sessionId = sessionId;
+    try {
+        const sessionId = req.params.sessionId;
+        
+        // Inicializar sessão se não existir
+        if (!sessions.has(sessionId)) {
+            await connectToWhatsApp(sessionId);
+            // Aguardar um pouco para QR ser gerado
+            await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+        
+        const session = sessions.get(sessionId);
+        
+        if (!session || !session.qrCode) {
+            return res.status(404).json({ 
+                success: false, 
+                error: `QR Code não disponível para sessão ${sessionId}. Tente reconectar.`,
+                session_id: sessionId
+            });
+        }
+
+        // Gerar imagem QR Code
+        const qrImage = await QRCode.toDataURL(session.qrCode);
+        
+        res.json({
+            success: true,
+            qr: session.qrCode,
+            qr_image: qrImage,
+            instructions: 'Abra WhatsApp → Configurações → Aparelhos conectados → Conectar um aparelho',
+            session_id: sessionId
+        });
+        
+    } catch (error) {
+        console.error('❌ Erro ao gerar QR:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Erro ao gerar QR Code',
+            session_id: req.query.sessionId
+        });
+    }
+});
+
+// Inicializar servidor
+app.listen(PORT, () => {
+    console.log('🚀 Baileys API rodando na porta', PORT);
+    console.log('📱 Status: http://localhost:3000/status');
+    console.log('🔗 QR Code: http://localhost:3000/qr');
     console.log('📱 Sistema multi-sessão Baileys inicializado');
     console.log('📋 Endpoints disponíveis:');
     console.log('   GET  /status/:sessionId - Status da sessão');
@@ -550,13 +550,7 @@ app.listen(PORT, () => {
     console.log('   POST /clear-session/:sessionId - Limpar sessão');
     console.log('   GET  /sessions - Listar todas as sessões');
     console.log('');
-});
-
-// Tratamento de erros
-process.on('uncaughtException', (error) => {
-    console.error('❌ Erro não tratado:', error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Promise rejeitada:', reason);
+    console.log('🔥 CADA USUÁRIO DEVE TER SUA PRÓPRIA SESSÃO!');
+    console.log('   Exemplo: /qr/user_1460561546');
+    console.log('   Exemplo: /status/user_987654321');
 });

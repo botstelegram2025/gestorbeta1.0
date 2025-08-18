@@ -8491,7 +8491,9 @@ Exemplos comuns:
     def verificar_status_baileys(self, chat_id):
         """Verifica status da API Baileys em tempo real"""
         try:
-            response = requests.get("http://localhost:3000/status", timeout=10)
+            # Usar sessionId específico do usuário para multi-sessão
+            session_id = f"user_{chat_id}"
+            response = requests.get(f"http://localhost:3000/status/{session_id}", timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
