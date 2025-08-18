@@ -435,23 +435,24 @@ class MessageScheduler:
                                 logger.info(f"⏭️  {cliente['nome']} - mensagem já enviada hoje")
                                 continue
                         
-                        if self._enviar_mensagem_cliente(cliente, 'vencimento_1dia_apos'):
+                        # CRÍTICO: Passar chat_id_usuario para isolamento
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_1dia_apos', cliente.get('chat_id_usuario')):
                             enviadas += 1
                             logger.info(f"📧 Cobrança enviada: {cliente['nome']} (vencido há {dias_vencido} dias)")
                         
                     # Processar também os que vencem hoje/amanhã/depois de amanhã
                     elif dias_vencimento == 0:
-                        if self._enviar_mensagem_cliente(cliente, 'vencimento_hoje'):
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_hoje', cliente.get('chat_id_usuario')):
                             enviadas += 1
                             logger.info(f"🚨 Alerta enviado: {cliente['nome']} (vence hoje)")
                             
                     elif dias_vencimento == 1:
-                        if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias'):
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias', cliente.get('chat_id_usuario')):
                             enviadas += 1
                             logger.info(f"⏰ Lembrete enviado: {cliente['nome']} (vence amanhã)")
                             
                     elif dias_vencimento == 2:
-                        if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias'):
+                        if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias', cliente.get('chat_id_usuario')):
                             enviadas += 1
                             logger.info(f"⏰ Lembrete enviado: {cliente['nome']} (vence em 2 dias)")
                         

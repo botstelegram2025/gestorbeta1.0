@@ -37,42 +37,43 @@ class TemplateManager:
             'pix_beneficiario': 'Nome do beneficiário PIX'
         }
     
-    def listar_templates(self, apenas_ativos=True):
-        """Lista todos os templates disponíveis"""
+    def listar_templates(self, apenas_ativos=True, chat_id_usuario=None):
+        """Lista templates com isolamento por usuário"""
         try:
-            return self.db.listar_templates(apenas_ativos)
+            return self.db.listar_templates(apenas_ativos, chat_id_usuario)
         except Exception as e:
             logger.error(f"Erro ao listar templates: {e}")
             return []
     
-    def obter_template(self, template_id):
-        """Obtém template por ID"""
+    def obter_template(self, template_id, chat_id_usuario=None):
+        """Obtém template por ID com isolamento por usuário"""
         try:
-            return self.db.obter_template(template_id)
+            return self.db.obter_template(template_id, chat_id_usuario)
         except Exception as e:
             logger.error(f"Erro ao obter template {template_id}: {e}")
             return None
     
-    def buscar_template_por_id(self, template_id):
-        """Busca template por ID (alias para compatibilidade)"""
+    def buscar_template_por_id(self, template_id, chat_id_usuario=None):
+        """Busca template por ID com isolamento por usuário"""
         try:
-            return self.db.obter_template(template_id)
+            return self.db.obter_template(template_id, chat_id_usuario)
         except Exception as e:
             logger.error(f"Erro ao buscar template {template_id}: {e}")
             return None
     
-    def buscar_template(self, template_id):
-        """Busca template por ID (alias adicional para compatibilidade)"""
+    def buscar_template(self, template_id, chat_id_usuario=None):
+        """Busca template por ID com isolamento por usuário"""
         try:
-            return self.db.obter_template(template_id)
+            return self.db.obter_template(template_id, chat_id_usuario)
         except Exception as e:
             logger.error(f"Erro ao buscar template {template_id}: {e}")
             return None
     
-    def excluir_template(self, template_id):
-        """Exclui template definitivamente"""
+    def excluir_template(self, template_id, chat_id_usuario=None):
+        """Exclui template definitivamente com isolamento por usuário"""
         try:
-            return self.db.excluir_template(template_id)
+            self.db.excluir_template(template_id, chat_id_usuario)
+            return True
         except Exception as e:
             logger.error(f"Erro ao excluir template {template_id}: {e}")
             return False
@@ -85,10 +86,10 @@ class TemplateManager:
             logger.error(f"Erro ao atualizar campo {campo} do template {template_id}: {e}")
             return False
     
-    def obter_template_por_tipo(self, tipo):
-        """Obtém template por tipo"""
+    def obter_template_por_tipo(self, tipo, chat_id_usuario=None):
+        """Obtém template por tipo com isolamento por usuário"""
         try:
-            return self.db.obter_template_por_tipo(tipo)
+            return self.db.obter_template_por_tipo(tipo, chat_id_usuario)
         except Exception as e:
             logger.error(f"Erro ao obter template por tipo {tipo}: {e}")
             return None

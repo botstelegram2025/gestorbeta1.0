@@ -5260,11 +5260,21 @@ Deseja {status_texto.lower()} este template?"""
             self.send_message(chat_id, "❌ Erro ao carregar template para edição.")
     
     def confirmar_exclusao_template(self, chat_id, template_id, message_id):
-        """Confirma exclusão de template"""
+        """Confirma exclusão de template com isolamento por usuário"""
         try:
-            template = self.template_manager.buscar_template_por_id(template_id) if self.template_manager else None
+            # CRÍTICO: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id) if self.template_manager else None
             if not template:
-                self.send_message(chat_id, "❌ Template não encontrado.")
+                self.send_message(chat_id, "❌ Template não encontrado ou você não tem permissão para excluí-lo.")
+                return
+            
+            # Verificar se é template padrão do sistema (não pode ser excluído)
+            if template.get('chat_id_usuario') is None:
+                self.send_message(chat_id, 
+                    "❌ *Template padrão do sistema*\n\n"
+                    "Os templates padrão não podem ser excluídos. "
+                    "Apenas templates personalizados podem ser removidos.",
+                    parse_mode='Markdown')
                 return
             
             mensagem = f"""🗑️ *Confirmar Exclusão*
@@ -5292,18 +5302,31 @@ Deseja realmente excluir este template?"""
             logger.error(f"Erro ao confirmar exclusão: {e}")
     
     def excluir_template(self, chat_id, template_id, message_id):
-        """Exclui template definitivamente"""
+        """Exclui template definitivamente com isolamento por usuário"""
         try:
-            template = self.template_manager.buscar_template_por_id(template_id) if self.template_manager else None
+            # CRÍTICO: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id) if self.template_manager else None
             if not template:
-                self.send_message(chat_id, "❌ Template não encontrado.")
+                self.send_message(chat_id, "❌ Template não encontrado ou você não tem permissão para excluí-lo.")
+                return
+            
+            # Verificar se é template padrão do sistema (não pode ser excluído)
+            if template.get('chat_id_usuario') is None:
+                self.send_message(chat_id, 
+                    "❌ *Template padrão do sistema*\n\n"
+                    "Os templates padrão não podem ser excluídos. "
+                    "Apenas templates personalizados podem ser removidos.",
+                    parse_mode='Markdown')
                 return
             
             nome_template = template['nome']
             
-            # Remover template do banco
+            # CRÍTICO: Remover template do banco com isolamento por usuário
             if self.template_manager:
-                self.template_manager.excluir_template(template_id)
+                sucesso = self.template_manager.excluir_template(template_id, chat_id)
+                if not sucesso:
+                    self.send_message(chat_id, "❌ Erro ao excluir template. Verifique se você tem permissão.")
+                    return
             
             self.edit_message(chat_id, message_id,
                 f"✅ *Template excluído com sucesso!*\n\n"

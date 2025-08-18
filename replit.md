@@ -18,7 +18,7 @@ User validation: Automatic messages only sent when valid chat_id_usuario is pres
 QR code persistence: WhatsApp sessions automatically saved to PostgreSQL and restored on Railway deploys, eliminating need to re-scan QR codes after updates.
 Daily alerts isolation: Daily verification alerts and automatic message processing now fully isolated by user - each user receives only their own client data and alerts.
 Hybrid scheduling system: System uses global schedules for efficiency but detects and logs individual user preferences. Data processing completely isolated by user while maintaining centralized timing for optimal resource usage.
-Final corrections 18/08/2025: Complete user isolation in daily alerts implemented, hybrid scheduling system optimized, Templates button in configuration menu fixed, and comprehensive security documentation created. System ready for Railway deployment with full multi-tenant isolation.
+Final corrections 18/08/2025: Complete user isolation in daily alerts implemented, hybrid scheduling system optimized, Templates button in configuration menu fixed, and comprehensive security documentation created. CRITICAL SECURITY FIX APPLIED: Template isolation vulnerability completely resolved - templates.py, database.py, and scheduler.py corrected to prevent system default templates from being sent to clients. TEMPLATE DELETION ERROR FIXED: User isolation implemented in template deletion methods, preventing errors and ensuring users can only delete their own templates while protecting system defaults. System ready for Railway deployment with full multi-tenant isolation and template security guaranteed.
 
 ## System Architecture
 
