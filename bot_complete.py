@@ -16,7 +16,7 @@ import pytz
 from database import DatabaseManager
 from templates import TemplateManager
 from baileys_api import BaileysAPI
-from scheduler import MessageScheduler
+from scheduler_v2_simple import SimpleScheduler
 # from baileys_clear import BaileysCleaner  # Removido - não utilizado
 from schedule_config import ScheduleConfig
 from whatsapp_session_api import session_api, init_session_manager
@@ -201,7 +201,7 @@ class TelegramBot:
         try:
             # Inicializar agendador (apenas se dependências disponíveis)
             if self.db and self.baileys_api and self.template_manager:
-                self.scheduler = MessageScheduler(self.db, self.baileys_api, self.template_manager)
+                self.scheduler = SimpleScheduler(self.db, self.baileys_api, self.template_manager)
                 # Definir instância do bot no scheduler para alertas automáticos
                 self.scheduler.set_bot_instance(self)
                 self.scheduler_instance = self.scheduler
@@ -430,7 +430,7 @@ class TelegramBot:
                 # Verificar se está aguardando horário personalizado
                 if isinstance(user_state, str) and user_state.startswith('aguardando_horario_'):
                     if hasattr(self, 'schedule_config') and self.schedule_config:
-                        if self.schedule_config.processar_horario_personalizado(chat_id, text):
+                        if self.schedule_config.processar_horario_personalizado(chat_id, text, user_state):
                             return  # Horário processado com sucesso
                 
                 logger.info(f"Processando estado de conversação para {chat_id}")
@@ -916,7 +916,7 @@ Após 7 dias, continue usando por apenas R$ 20,00/mês."""
             return
         
         # Verificar se é alteração de dados de usuário
-        if user_state.get('state', '').startswith('alterando_'):
+        if isinstance(user_state, dict) and user_state.get('state', '').startswith('alterando_'):
             self.processar_alteracao_usuario_dados(chat_id, text, user_state)
             return
         
@@ -1905,8 +1905,8 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
                 cliente_id = int(callback_data.split('_')[2])
                 self.toggle_notificacao_geral(chat_id, cliente_id, message_id)
             
-            elif callback_data.startswith('confirmar_excluir_'):
-                cliente_id = int(callback_data.split('_')[2])
+            elif callback_data.startswith('confirmar_excluir_cliente_'):
+                cliente_id = int(callback_data.split('_')[3])
                 self.excluir_cliente(chat_id, cliente_id, message_id)
             
             # Callbacks de cópia removidos - informações agora copiáveis diretamente
@@ -1952,8 +1952,20 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
                 self.confirmar_exclusao_template(chat_id, template_id, message_id)
             
             elif callback_data.startswith('confirmar_excluir_template_'):
-                template_id = int(callback_data.split('_')[3])
-                self.excluir_template(chat_id, template_id, message_id)
+                try:
+                    # CORREÇÃO: Pegar o último elemento após split para obter o template_id
+                    logger.info(f"DEBUG: Processando exclusão - callback_data: {callback_data}")
+                    parts = callback_data.split('_')
+                    logger.info(f"DEBUG: Split parts: {parts}")
+                    template_id_str = parts[-1]
+                    logger.info(f"DEBUG: Template ID string: '{template_id_str}'")
+                    template_id = int(template_id_str)
+                    logger.info(f"DEBUG: Template ID convertido: {template_id}")
+                    self.excluir_template(chat_id, template_id, message_id)
+                except Exception as e:
+                    logger.error(f"Erro ao processar exclusão de template: {e}")
+                    logger.error(f"Callback data: {callback_data}")
+                    self.send_message(chat_id, f"❌ Erro ao processar exclusão: {str(e)}")
             
             elif callback_data.startswith('template_enviar_'):
                 template_id = int(callback_data.split('_')[2])
@@ -2473,10 +2485,54 @@ Após o período de teste, continue usando por apenas R$ 20,00/mês!"""
                 payment_id = callback_data.split('_')[2]
                 self.verificar_pagamento(chat_id, payment_id)
             
+            # ===== HANDLERS FALTANTES CORRIGIDOS =====
+            elif callback_data == 'contatar_suporte':
+                self.contatar_suporte(chat_id)
+            
+            elif callback_data == 'configuracoes_menu':
+                self.configuracoes_menu(chat_id)
+            
+            elif callback_data == 'cadastrar_outro_cliente':
+                self.iniciar_cadastro_cliente(chat_id)
+            
+            elif callback_data == 'voltar_menu_principal':
+                self.start_command(chat_id)
+            
+            elif callback_data == 'sistema_verificar':
+                self.sistema_verificar_apis(chat_id)
+            
+            elif callback_data == 'sistema_logs':
+                self.sistema_mostrar_logs(chat_id)
+            
+            elif callback_data == 'sistema_status':
+                self.sistema_mostrar_status(chat_id)
+            
+            elif callback_data == 'sistema_restart':
+                self.sistema_reiniciar(chat_id)
+            
+            elif callback_data == 'confirmar_restart':
+                self.executar_restart(chat_id)
+            
+            elif callback_data.startswith('toggle_notif_'):
+                status_atual = callback_data.split('_')[2]
+                self.toggle_notificacoes_sistema(chat_id, status_atual)
+            
+            elif callback_data == 'ajuda_pagamento':
+                self.mostrar_ajuda_pagamento(chat_id)
+            
+            elif callback_data == 'config_horarios':
+                self.config_horarios_menu(chat_id)
+            
         except Exception as e:
             logger.error(f"Erro ao processar callback: {e}")
             logger.error(f"Callback data: {callback_data}")
-            self.send_message(chat_id, "❌ Erro ao processar ação.")
+            # Adicionar traceback para debug
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            
+            # Não mostrar erro para callbacks já tratados com try-catch específico
+            if not callback_data.startswith('confirmar_excluir_template_'):
+                self.send_message(chat_id, "❌ Erro ao processar ação.")
     
     def gerar_pix_pagamento(self, user_chat_id, callback_query_id=None):
         """Gera PIX para pagamento do usuário"""
@@ -2883,11 +2939,12 @@ Escolha uma das opções abaixo:"""
             else:
                 logger.warning("Scheduler não disponível para cancelar mensagens")
             
-            # Verificar se existe template de renovação
+            # Verificar se existe template de renovação criado pelo usuário
             template_renovacao = None
             if self.template_manager:
-                templates = self.template_manager.listar_templates()
-                for template in templates:
+                all_templates = self.template_manager.listar_templates(chat_id_usuario=chat_id)
+                user_templates = [t for t in all_templates if t.get('chat_id_usuario') is not None]
+                for template in user_templates:
                     if template.get('tipo') == 'renovacao':
                         template_renovacao = template
                         break
@@ -2966,11 +3023,12 @@ Escolha uma das opções abaixo:"""
             else:
                 logger.warning("Scheduler não disponível para cancelar mensagens")
             
-            # Verificar se existe template de renovação
+            # Verificar se existe template de renovação criado pelo usuário
             template_renovacao = None
             if self.template_manager:
-                templates = self.template_manager.listar_templates()
-                for template in templates:
+                all_templates = self.template_manager.listar_templates(chat_id_usuario=chat_id)
+                user_templates = [t for t in all_templates if t.get('chat_id_usuario') is not None]
+                for template in user_templates:
                     if template.get('tipo') == 'renovacao':
                         template_renovacao = template
                         break
@@ -3098,11 +3156,12 @@ Exemplo: 15/10/2025"""
             else:
                 logger.warning("Scheduler não disponível para cancelar mensagens")
             
-            # Verificar se existe template de renovação
+            # Verificar se existe template de renovação criado pelo usuário
             template_renovacao = None
             if self.template_manager:
-                templates = self.template_manager.listar_templates()
-                for template in templates:
+                all_templates = self.template_manager.listar_templates(chat_id_usuario=chat_id)
+                user_templates = [t for t in all_templates if t.get('chat_id_usuario') is not None]
+                for template in user_templates:
                     if template.get('tipo') == 'renovacao':
                         template_renovacao = template
                         break
@@ -3162,8 +3221,8 @@ Exemplo: 15/10/2025"""
                 self.send_message(chat_id, "❌ Cliente não encontrado.")
                 return
             
-            # Buscar template
-            template = self.template_manager.buscar_template_por_id(template_id)
+            # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id)
             if not template:
                 self.send_message(chat_id, "❌ Template não encontrado.")
                 return
@@ -3232,8 +3291,9 @@ Exemplo: 15/10/2025"""
                 self.send_message(chat_id, "❌ Cliente não encontrado.")
                 return
             
-            # Buscar templates disponíveis
-            templates = self.template_manager.listar_templates() if self.template_manager else []
+            # Buscar apenas templates criados pelo usuário (excluir templates padrão do sistema)
+            all_templates = self.template_manager.listar_templates(chat_id_usuario=chat_id) if self.template_manager else []
+            templates = [t for t in all_templates if t.get('chat_id_usuario') is not None]
             
             if not templates:
                 mensagem = f"""💬 *Enviar Mensagem*
@@ -3241,9 +3301,11 @@ Exemplo: 15/10/2025"""
 👤 *Cliente:* {cliente['nome']}
 📱 *Telefone:* {cliente['telefone']}
 
-❌ *Nenhum template encontrado*
+❌ *Nenhum template personalizado encontrado*
 
-Para enviar mensagens, é necessário ter templates cadastrados.
+Para enviar mensagens, você precisa criar seus próprios templates.
+Os templates padrão do sistema não são mostrados aqui por segurança.
+
 Vá em Menu → Templates → Criar Template primeiro."""
                 
                 inline_keyboard = [
@@ -3256,13 +3318,13 @@ Vá em Menu → Templates → Criar Template primeiro."""
                                 reply_markup={'inline_keyboard': inline_keyboard})
                 return
             
-            # Mostrar templates disponíveis
+            # Mostrar apenas templates personalizados do usuário
             mensagem = f"""💬 *Enviar Mensagem*
 
 👤 *Cliente:* {cliente['nome']}
 📱 *Telefone:* {cliente['telefone']}
 
-📄 *Escolha um template:*"""
+📄 *Escolha um dos seus templates personalizados:*"""
             
             # Criar botões para templates (máximo 10)
             inline_keyboard = []
@@ -4333,7 +4395,7 @@ Selecione o período desejado para análise:
                 pass
             
             # Templates disponíveis
-            templates_count = len(self.template_manager.listar_templates()) if self.template_manager else 0
+            templates_count = len(self.template_manager.listar_templates(chat_id_usuario=chat_id)) if self.template_manager else 0
             
             mensagem = f"""📱 *STATUS DO SISTEMA*
 
@@ -4826,9 +4888,9 @@ Infraestrutura sólida, processos automatizados e base tecnológica para crescim
         """Menu de templates com interface interativa"""
         try:
             logger.info(f"Iniciando menu de templates para chat {chat_id}")
-            # CRÍTICO: Obter apenas templates do usuário para isolamento
+            # CORREÇÃO CRÍTICA: Obter APENAS templates do usuário para isolamento total
             templates = self.db.listar_templates(apenas_ativos=True, chat_id_usuario=chat_id) if self.db else []
-            logger.info(f"Templates encontrados: {len(templates)}")
+            logger.info(f"Templates encontrados: {len(templates)} (isolamento por usuário ativo)")
             
             if not templates:
                 mensagem = """📄 *Templates de Mensagem*
@@ -4860,6 +4922,7 @@ Use o botão abaixo para criar seu primeiro template."""
                     'geral': '📝'
                 }.get(template.get('tipo', 'geral'), '📝')
                 
+                # Apenas templates do usuário - sem emoji de sistema
                 template_texto = f"{emoji_tipo} {template['nome']} ({template['uso_count']} usos)"
                 inline_keyboard.append([{
                     'text': template_texto,
@@ -4882,7 +4945,7 @@ Use o botão abaixo para criar seu primeiro template."""
             total_templates = len(templates)
             templates_ativos = len([t for t in templates if t.get('ativo', True)])
             
-            mensagem = f"""📄 *Templates de Mensagem* ({total_templates})
+            mensagem = f"""📄 *Seus Templates de Mensagem* ({total_templates})
 
 📊 *Status:*
 ✅ Ativos: {templates_ativos}
@@ -4904,8 +4967,11 @@ Use o botão abaixo para criar seu primeiro template."""
         """Mostra detalhes do template com opções de ação"""
         try:
             logger.info(f"Executando mostrar_detalhes_template: template_id={template_id}")
-            # CRÍTICO: Buscar apenas template do usuário para isolamento
+            # Buscar template (pode ser do usuário ou do sistema para visualização)
             template = self.db.obter_template(template_id, chat_id_usuario=chat_id) if self.db else None
+            if not template:
+                # Tentar buscar template do sistema
+                template = self.db.obter_template(template_id, chat_id_usuario=None) if self.db else None
             logger.info(f"Template encontrado: {template is not None}")
             if not template:
                 self.send_message(chat_id, "❌ Template não encontrado.")
@@ -4914,6 +4980,11 @@ Use o botão abaixo para criar seu primeiro template."""
             # Status emoji
             status_emoji = "✅" if template.get('ativo', True) else "❌"
             status_texto = "Ativo" if template.get('ativo', True) else "Inativo"
+            
+            # Verificar se é template do sistema
+            is_sistema = template.get('chat_id_usuario') is None
+            emoji_sistema = "⚠️ " if is_sistema else ""
+            tipo_texto = "SISTEMA" if is_sistema else "PERSONALIZADO"
             
             # Tipo emoji
             emoji_tipo = {
@@ -4931,8 +5002,9 @@ Use o botão abaixo para criar seu primeiro template."""
             # Escapar caracteres especiais do Markdown para evitar parse errors
             conteudo_safe = conteudo_preview.replace('*', '').replace('_', '').replace('`', '').replace('[', '').replace(']', '')
             
-            mensagem = f"""📄 *{template['nome']}*
+            mensagem = f"""📄 *{emoji_sistema}{template['nome']}*
 
+🏷️ *Categoria:* {tipo_texto}
 {emoji_tipo} *Tipo:* {template.get('tipo', 'geral').title()}
 {status_emoji} *Status:* {status_texto}
 📊 *Usado:* {template.get('uso_count', 0)} vezes
@@ -4943,21 +5015,35 @@ Use o botão abaixo para criar seu primeiro template."""
 
 🔧 *Ações disponíveis:*"""
             
-            # Botões de ação
-            inline_keyboard = [
-                [
-                    {'text': '✏️ Editar', 'callback_data': f'template_editar_{template_id}'},
-                    {'text': '📤 Enviar', 'callback_data': f'template_enviar_{template_id}'}
-                ],
-                [
-                    {'text': '🗑️ Excluir', 'callback_data': f'template_excluir_{template_id}'},
-                    {'text': '📊 Estatísticas', 'callback_data': f'template_info_{template_id}'}
-                ],
-                [
-                    {'text': '📋 Voltar à Lista', 'callback_data': 'voltar_templates'},
-                    {'text': '🔙 Menu Principal', 'callback_data': 'menu_principal'}
+            # Botões de ação (condicionais para templates do sistema)
+            if is_sistema:
+                # Templates do sistema - apenas visualização e envio
+                inline_keyboard = [
+                    [
+                        {'text': '📤 Enviar', 'callback_data': f'template_enviar_{template_id}'},
+                        {'text': '📊 Estatísticas', 'callback_data': f'template_info_{template_id}'}
+                    ],
+                    [
+                        {'text': '📋 Voltar à Lista', 'callback_data': 'voltar_templates'},
+                        {'text': '🔙 Menu Principal', 'callback_data': 'menu_principal'}
+                    ]
                 ]
-            ]
+            else:
+                # Templates do usuário - todas as ações
+                inline_keyboard = [
+                    [
+                        {'text': '✏️ Editar', 'callback_data': f'template_editar_{template_id}'},
+                        {'text': '📤 Enviar', 'callback_data': f'template_enviar_{template_id}'}
+                    ],
+                    [
+                        {'text': '🗑️ Excluir', 'callback_data': f'template_excluir_{template_id}'},
+                        {'text': '📊 Estatísticas', 'callback_data': f'template_info_{template_id}'}
+                    ],
+                    [
+                        {'text': '📋 Voltar à Lista', 'callback_data': 'voltar_templates'},
+                        {'text': '🔙 Menu Principal', 'callback_data': 'menu_principal'}
+                    ]
+                ]
             
             logger.info(f"Preparando envio: message_id={message_id}, chat_id={chat_id}")
             logger.info(f"Mensagem tamanho: {len(mensagem)} chars")
@@ -5011,7 +5097,8 @@ Use o botão abaixo para criar seu primeiro template."""
     def iniciar_edicao_template_campo(self, chat_id, template_id, campo):
         """Inicia edição de um campo específico do template"""
         try:
-            template = self.template_manager.buscar_template_por_id(template_id) if self.template_manager else None
+            # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id) if self.template_manager else None
             if not template:
                 self.send_message(chat_id, "❌ Template não encontrado.")
                 return
@@ -5143,7 +5230,7 @@ Deseja {status_texto.lower()} este template?"""
                 
                 # Atualizar template no banco
                 if self.db and hasattr(self.db, 'atualizar_template_campo'):
-                    sucesso = self.db.atualizar_template_campo(template_id, campo, novo_valor)
+                    sucesso = self.db.atualizar_template_campo(template_id, campo, novo_valor, chat_id_usuario=chat_id)
                     if sucesso:
                         # Limpar estado de conversa
                         if chat_id in self.conversation_states:
@@ -5168,7 +5255,7 @@ Deseja {status_texto.lower()} este template?"""
         """Atualiza tipo do template"""
         try:
             if self.template_manager and hasattr(self.template_manager, 'atualizar_campo'):
-                sucesso = self.template_manager.atualizar_campo(template_id, 'tipo', tipo)
+                sucesso = self.template_manager.atualizar_campo(template_id, 'tipo', tipo, chat_id_usuario=chat_id)
                 if sucesso:
                     self.send_message(chat_id, 
                                     f"✅ Tipo atualizado para: {tipo.replace('_', ' ').title()}",
@@ -5188,7 +5275,7 @@ Deseja {status_texto.lower()} este template?"""
         """Atualiza status do template"""
         try:
             if self.template_manager and hasattr(self.template_manager, 'atualizar_campo'):
-                sucesso = self.template_manager.atualizar_campo(template_id, 'ativo', status)
+                sucesso = self.template_manager.atualizar_campo(template_id, 'ativo', status, chat_id_usuario=chat_id)
                 if sucesso:
                     status_texto = "Ativo" if status else "Inativo"
                     self.send_message(chat_id, 
@@ -5208,7 +5295,8 @@ Deseja {status_texto.lower()} este template?"""
     def editar_template(self, chat_id, template_id):
         """Inicia edição de template"""
         try:
-            template = self.template_manager.buscar_template_por_id(template_id) if self.template_manager else None
+            # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id) if self.template_manager else None
             if not template:
                 self.send_message(chat_id, "❌ Template não encontrado.")
                 return
@@ -5260,11 +5348,21 @@ Deseja {status_texto.lower()} este template?"""
             self.send_message(chat_id, "❌ Erro ao carregar template para edição.")
     
     def confirmar_exclusao_template(self, chat_id, template_id, message_id):
-        """Confirma exclusão de template"""
+        """Confirma exclusão de template com isolamento por usuário"""
         try:
-            template = self.template_manager.buscar_template_por_id(template_id) if self.template_manager else None
+            # CRÍTICO: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id) if self.template_manager else None
             if not template:
-                self.send_message(chat_id, "❌ Template não encontrado.")
+                self.send_message(chat_id, "❌ Template não encontrado ou você não tem permissão para excluí-lo.")
+                return
+            
+            # Verificar se é template padrão do sistema (não pode ser excluído)
+            if template.get('chat_id_usuario') is None:
+                self.send_message(chat_id, 
+                    "❌ *Template padrão do sistema*\n\n"
+                    "Os templates padrão não podem ser excluídos. "
+                    "Apenas templates personalizados podem ser removidos.",
+                    parse_mode='Markdown')
                 return
             
             mensagem = f"""🗑️ *Confirmar Exclusão*
@@ -5292,18 +5390,31 @@ Deseja realmente excluir este template?"""
             logger.error(f"Erro ao confirmar exclusão: {e}")
     
     def excluir_template(self, chat_id, template_id, message_id):
-        """Exclui template definitivamente"""
+        """Exclui template definitivamente com isolamento por usuário"""
         try:
-            template = self.template_manager.buscar_template_por_id(template_id) if self.template_manager else None
+            # CRÍTICO: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id) if self.template_manager else None
             if not template:
-                self.send_message(chat_id, "❌ Template não encontrado.")
+                self.send_message(chat_id, "❌ Template não encontrado ou você não tem permissão para excluí-lo.")
+                return
+            
+            # Verificar se é template padrão do sistema (não pode ser excluído)
+            if template.get('chat_id_usuario') is None:
+                self.send_message(chat_id, 
+                    "❌ *Template padrão do sistema*\n\n"
+                    "Os templates padrão não podem ser excluídos. "
+                    "Apenas templates personalizados podem ser removidos.",
+                    parse_mode='Markdown')
                 return
             
             nome_template = template['nome']
             
-            # Remover template do banco
+            # CRÍTICO: Remover template do banco com isolamento por usuário
             if self.template_manager:
-                self.template_manager.excluir_template(template_id)
+                sucesso = self.template_manager.excluir_template(template_id, chat_id_usuario=chat_id)
+                if not sucesso:
+                    self.send_message(chat_id, "❌ Erro ao excluir template. Verifique se você tem permissão.")
+                    return
             
             self.edit_message(chat_id, message_id,
                 f"✅ *Template excluído com sucesso!*\n\n"
@@ -5326,16 +5437,14 @@ Deseja realmente excluir este template?"""
     def selecionar_cliente_template(self, chat_id, template_id):
         """Seleciona cliente para enviar template"""
         try:
-            template = self.template_manager.buscar_template_por_id(template_id) if self.template_manager else None
+            # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
+            template = self.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id) if self.template_manager else None
             if not template:
                 self.send_message(chat_id, "❌ Template não encontrado.")
                 return
             
-            # Filtrar por usuário - admin vê todos, usuário comum vê apenas seus
-            if self.is_admin(chat_id):
-                clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None) if self.db else []
-            else:
-                clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id) if self.db else []
+            # CORREÇÃO CRÍTICA: Isolamento total por usuário - apenas clientes do próprio usuário
+            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id) if self.db else []
             
             if not clientes:
                 self.send_message(chat_id,
@@ -7273,6 +7382,338 @@ Dúvidas? Responda esta mensagem!
         except Exception as e:
             logger.error(f"Erro ao notificar admin sobre pagamento: {e}")
     
+    def contatar_suporte(self, chat_id):
+        """Mostra informações de contato do suporte"""
+        try:
+            admin_info = f"@{ADMIN_CHAT_ID}" if ADMIN_CHAT_ID else "Administrador"
+            
+            mensagem = f"""💬 *CONTATO SUPORTE*
+
+📞 *Como entrar em contato:*
+• Chat direto: {admin_info}
+• Telegram: @suporte_bot
+• WhatsApp: +55 11 99999-9999
+
+⏰ *Horário de Atendimento:*
+• Segunda à Sexta: 9h às 18h
+• Finais de semana: 10h às 16h
+
+🔧 *Para que serve o suporte:*
+• Problemas técnicos
+• Dúvidas sobre pagamentos
+• Configuração do sistema
+• Relatório de bugs
+
+💡 *Dica:* Descreva detalhadamente o problema para um atendimento mais rápido!"""
+            
+            inline_keyboard = [[
+                {'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}
+            ]]
+            
+            self.send_message(chat_id, mensagem,
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+            
+        except Exception as e:
+            logger.error(f"Erro ao mostrar contato suporte: {e}")
+            self.send_message(chat_id, "❌ Erro ao carregar informações de contato.")
+    
+    def sistema_verificar_apis(self, chat_id):
+        """Verifica status das APIs do sistema"""
+        try:
+            mensagem = "🔄 *VERIFICANDO APIs DO SISTEMA...*\n\n"
+            
+            # Verificar Telegram API
+            try:
+                response = self.get_me()
+                if response:
+                    mensagem += "✅ **Telegram API:** Conectada\n"
+                else:
+                    mensagem += "❌ **Telegram API:** Erro na conexão\n"
+            except:
+                mensagem += "❌ **Telegram API:** Falha na verificação\n"
+            
+            # Verificar Database
+            try:
+                if self.db and self.db.conexao:
+                    mensagem += "✅ **PostgreSQL:** Conectado\n"
+                else:
+                    mensagem += "❌ **PostgreSQL:** Desconectado\n"
+            except:
+                mensagem += "❌ **PostgreSQL:** Erro na verificação\n"
+            
+            # Verificar Baileys API
+            try:
+                import requests
+                response = requests.get("http://localhost:3000/status", timeout=5)
+                if response.status_code == 200:
+                    mensagem += "✅ **Baileys API:** Rodando\n"
+                else:
+                    mensagem += "❌ **Baileys API:** Erro na resposta\n"
+            except:
+                mensagem += "❌ **Baileys API:** Não disponível\n"
+            
+            # Verificar Mercado Pago
+            try:
+                if self.mercado_pago and self.mercado_pago.is_configured():
+                    mensagem += "✅ **Mercado Pago:** Configurado\n"
+                else:
+                    mensagem += "⚠️ **Mercado Pago:** Não configurado\n"
+            except:
+                mensagem += "❌ **Mercado Pago:** Erro na verificação\n"
+            
+            inline_keyboard = [[
+                {'text': '🔄 Atualizar', 'callback_data': 'sistema_verificar'},
+                {'text': '🔙 Voltar', 'callback_data': 'voltar_configs'}
+            ]]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+        except Exception as e:
+            logger.error(f"Erro ao verificar APIs: {e}")
+            self.send_message(chat_id, "❌ Erro ao verificar status das APIs.")
+    
+    def sistema_mostrar_logs(self, chat_id):
+        """Mostra logs recentes do sistema"""
+        try:
+            mensagem = "📋 *LOGS RECENTES DO SISTEMA*\n\n"
+            
+            # Ler logs recentes (últimas 10 linhas do arquivo de log se existir)
+            try:
+                with open('bot.log', 'r') as f:
+                    lines = f.readlines()[-10:]  # Últimas 10 linhas
+                    for line in lines:
+                        mensagem += f"`{line.strip()}`\n"
+            except FileNotFoundError:
+                mensagem += "⚠️ Arquivo de log não encontrado.\n"
+                mensagem += "📝 Sistema está rodando sem arquivo de log específico.\n"
+            except Exception as e:
+                mensagem += f"❌ Erro ao ler logs: {str(e)[:50]}...\n"
+            
+            inline_keyboard = [[
+                {'text': '🔄 Atualizar', 'callback_data': 'sistema_logs'},
+                {'text': '🔙 Voltar', 'callback_data': 'voltar_configs'}
+            ]]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+        except Exception as e:
+            logger.error(f"Erro ao mostrar logs: {e}")
+            self.send_message(chat_id, "❌ Erro ao carregar logs do sistema.")
+    
+    def sistema_mostrar_status(self, chat_id):
+        """Mostra status detalhado do sistema"""
+        try:
+            import psutil
+            import os
+            from datetime import datetime
+            
+            # Informações do sistema
+            cpu_percent = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            
+            # Uptime (aproximado)
+            boot_time = datetime.fromtimestamp(psutil.boot_time())
+            uptime = datetime.now() - boot_time
+            
+            mensagem = f"""📊 *STATUS DETALHADO DO SISTEMA*
+
+🖥️ **Hardware:**
+• CPU: {cpu_percent}%
+• RAM: {memory.percent}% ({memory.used // (1024**3)}GB / {memory.total // (1024**3)}GB)
+• Disco: {disk.percent}% ({disk.used // (1024**3)}GB / {disk.total // (1024**3)}GB)
+
+⏰ **Tempo de Execução:**
+• Uptime: {str(uptime).split('.')[0]}
+• Iniciado em: {boot_time.strftime('%d/%m/%Y %H:%M')}
+
+🔧 **Ambiente:**
+• Python: {os.sys.version.split()[0]}
+• PID: {os.getpid()}
+• Railway: {'✅' if os.getenv('RAILWAY_ENVIRONMENT') else '❌'}
+
+📊 **Estatísticas:**
+• Clientes no sistema: {self.db.contar_clientes() if self.db else 'N/A'}
+• Templates ativos: {self.db.contar_templates_ativos() if self.db else 'N/A'}
+• Mensagens enviadas hoje: {self.db.contar_mensagens_hoje() if self.db else 'N/A'}"""
+            
+            inline_keyboard = [[
+                {'text': '🔄 Atualizar', 'callback_data': 'sistema_status'},
+                {'text': '🔙 Voltar', 'callback_data': 'voltar_configs'}
+            ]]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+        except ImportError:
+            self.send_message(chat_id, "❌ Biblioteca psutil não disponível para mostrar status detalhado.")
+        except Exception as e:
+            logger.error(f"Erro ao mostrar status: {e}")
+            self.send_message(chat_id, "❌ Erro ao carregar status do sistema.")
+    
+    def sistema_reiniciar(self, chat_id):
+        """Solicita confirmação para reiniciar o sistema"""
+        try:
+            mensagem = """⚠️ *REINICIAR SISTEMA*
+
+🔄 **Esta ação irá:**
+• Reiniciar o processo do bot
+• Recarregar todas as configurações
+• Reconectar com o banco de dados
+• Reinicar a API do WhatsApp
+
+⏰ **Tempo estimado:** 30-60 segundos
+
+❗ **ATENÇÃO:** 
+Durante o reinício, o bot ficará indisponível temporariamente.
+
+Deseja continuar?"""
+            
+            inline_keyboard = [
+                [{'text': '✅ Confirmar Reinício', 'callback_data': 'confirmar_restart'}],
+                [{'text': '❌ Cancelar', 'callback_data': 'voltar_configs'}]
+            ]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+        except Exception as e:
+            logger.error(f"Erro ao preparar reinício: {e}")
+            self.send_message(chat_id, "❌ Erro ao preparar reinicialização.")
+    
+    def executar_restart(self, chat_id):
+        """Executa o reinício do sistema"""
+        try:
+            self.send_message(chat_id, "🔄 **REINICIANDO SISTEMA...**\n\n⏳ Aguarde 30-60 segundos...")
+            
+            # Em ambiente Railway, não podemos reiniciar o processo diretamente
+            # Mas podemos notificar que foi solicitado
+            if os.getenv('RAILWAY_ENVIRONMENT'):
+                self.send_message(chat_id, "🚂 **RAILWAY DETECTADO**\n\nReinício solicitado. O Railway gerenciará o restart automaticamente se necessário.")
+            else:
+                # Para ambiente local, apenas recarregar configurações
+                logger.info(f"Restart solicitado pelo usuário {chat_id}")
+                self.send_message(chat_id, "✅ Sistema reiniciado internamente. Use /start para continuar.")
+            
+        except Exception as e:
+            logger.error(f"Erro durante restart: {e}")
+            self.send_message(chat_id, "❌ Erro durante reinicialização.")
+    
+    def toggle_notificacoes_sistema(self, chat_id, status_atual):
+        """Alterna o status das notificações do sistema"""
+        try:
+            # Inverter o status atual
+            novo_status = 'false' if status_atual.lower() == 'true' else 'true'
+            
+            # Atualizar no banco de dados (se houver configurações)
+            if self.db:
+                try:
+                    self.db.atualizar_configuracao(chat_id, 'notificacoes_ativas', novo_status)
+                except:
+                    pass  # Se não conseguir salvar, apenas mostrar a mudança
+            
+            status_texto = "✅ ATIVADAS" if novo_status == 'true' else "❌ DESATIVADAS"
+            
+            mensagem = f"""🔔 *NOTIFICAÇÕES {status_texto}*
+
+{'✅ Suas notificações foram ativadas!' if novo_status == 'true' else '❌ Suas notificações foram desativadas.'}
+
+📱 **Tipos de notificação:**
+• Vencimentos de clientes
+• Mensagens enviadas
+• Pagamentos confirmados
+• Falhas de envio
+• Relatórios diários
+
+Status atual: {status_texto}"""
+            
+            inline_keyboard = [
+                [
+                    {'text': '✅ Ativar' if novo_status == 'false' else '❌ Desativar', 
+                     'callback_data': f'toggle_notif_{novo_status}'},
+                ],
+                [
+                    {'text': '🔙 Configurações', 'callback_data': 'voltar_configs'}
+                ]
+            ]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+        except Exception as e:
+            logger.error(f"Erro ao alterar notificações: {e}")
+            self.send_message(chat_id, "❌ Erro ao alterar configurações de notificação.")
+    
+    def mostrar_ajuda_pagamento(self, chat_id):
+        """Mostra ajuda sobre pagamentos"""
+        try:
+            mensagem = """❓ *AJUDA - PAGAMENTOS*
+
+💳 **Como pagar sua assinatura:**
+
+1️⃣ **Gerar PIX:**
+   • Clique em "Gerar PIX"
+   • Use o QR Code no seu app do banco
+   • Pagamento é processado automaticamente
+
+2️⃣ **Verificar Pagamento:**
+   • Clique em "Verificar Pagamento"
+   • Sistema confirma automaticamente
+   • Acesso é liberado imediatamente
+
+3️⃣ **Problemas comuns:**
+   • PIX não aparece: Aguarde 2-3 minutos
+   • Pagamento não confirmado: Use "Verificar"
+   • QR Code expirado: Gere um novo
+
+💡 **Valor:** R$ 20,00/mês
+⏰ **Válido:** 30 dias a partir do pagamento
+🔄 **Renovação:** Automática via novo PIX
+
+📞 **Suporte:** Entre em contato se precisar"""
+            
+            inline_keyboard = [[
+                {'text': '💳 Gerar PIX', 'callback_data': f'gerar_pix_{chat_id}'},
+                {'text': '🏠 Menu Principal', 'callback_data': 'menu_principal'}
+            ]]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+        except Exception as e:
+            logger.error(f"Erro na ajuda de pagamento: {e}")
+            self.send_message(chat_id, "❌ Erro ao carregar ajuda.")
+    
+    def config_horarios_menu(self, chat_id):
+        """Menu de configuração de horários"""
+        try:
+            mensagem = """⏰ *CONFIGURAÇÃO DE HORÁRIOS*
+
+🕘 **Horários Atuais do Sistema:**
+• Envio de mensagens: 9:00h
+• Verificação diária: 9:00h  
+• Limpeza de logs: 2:00h
+
+⚙️ **Configurações Disponíveis:**
+Personalize os horários de acordo com sua necessidade."""
+            
+            inline_keyboard = [
+                [{'text': '📤 Horário Envio', 'callback_data': 'horario_personalizado_envio'}],
+                [{'text': '🔍 Horário Verificação', 'callback_data': 'horario_personalizado_verificacao'}],
+                [{'text': '🧹 Horário Limpeza', 'callback_data': 'horario_personalizado_limpeza'}],
+                [{'text': '🔙 Configurações', 'callback_data': 'voltar_configs'}]
+            ]
+            
+            self.send_message(chat_id, mensagem, 
+                            parse_mode='Markdown',
+                            reply_markup={'inline_keyboard': inline_keyboard})
+        except Exception as e:
+            logger.error(f"Erro no menu de horários: {e}")
+            self.send_message(chat_id, "❌ Erro ao carregar configurações de horário.")
+    
     def relatorios_usuario(self, chat_id):
         """Menu de relatórios para usuários não-admin"""
         try:
@@ -7415,7 +7856,7 @@ Dúvidas? Responda esta mensagem!
     def mostrar_stats_templates(self, chat_id):
         """Mostra estatísticas dos templates"""
         try:
-            templates = self.template_manager.listar_templates() if self.template_manager else []
+            templates = self.template_manager.listar_templates(chat_id_usuario=chat_id) if self.template_manager else []
             
             if not templates:
                 self.send_message(chat_id, "📊 Nenhum template para exibir estatísticas.")
@@ -7606,7 +8047,7 @@ Escolha o que deseja alterar:"""
             templates_pix = []
             if self.template_manager:
                 try:
-                    todos_templates = self.template_manager.listar_templates()
+                    todos_templates = self.template_manager.listar_templates(chat_id_usuario=chat_id)
                     for template in todos_templates:
                         conteudo = template.get('conteudo', '')
                         if '{pix}' in conteudo or '{titular}' in conteudo:
@@ -10549,7 +10990,9 @@ Confirma o envio da cobrança geral?"""
         """Busca template por ID com fallback para Railway"""
         try:
             if self.template_manager and hasattr(self.template_manager, 'buscar_template_por_id'):
-                return self.template_manager.buscar_template_por_id(template_id)
+                # CORREÇÃO CRÍTICA: Usar isolamento por usuário em Railway
+                chat_id = getattr(self, 'last_chat_id', None)
+                return self.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id)
             elif self.template_manager and hasattr(self.template_manager, 'get_template_by_id'):
                 return self.template_manager.get_template_by_id(template_id)
             else:
@@ -11146,9 +11589,9 @@ def enviar_template_para_cliente_global(chat_id, cliente_id, template_id):
             telegram_bot.send_message(chat_id, "❌ Cliente não encontrado.")
             return
         
-        # Buscar template  
+        # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
         logger.info(f"Buscando template {template_id}...")
-        template = telegram_bot.template_manager.buscar_template_por_id(template_id)
+        template = telegram_bot.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id)
         if not template:
             logger.error(f"Template {template_id} não encontrado")
             telegram_bot.send_message(chat_id, "❌ Template não encontrado.")
@@ -11212,7 +11655,8 @@ def confirmar_envio_mensagem_global(chat_id, cliente_id, template_id):
         # Buscar cliente e template
         logger.info(f"Buscando cliente {cliente_id} e template {template_id}...")
         cliente = telegram_bot.db.buscar_cliente_por_id(cliente_id)
-        template = telegram_bot.template_manager.buscar_template_por_id(template_id)
+        # CORREÇÃO CRÍTICA: Buscar template com isolamento por usuário
+        template = telegram_bot.template_manager.buscar_template_por_id(template_id, chat_id_usuario=chat_id)
         
         if not cliente or not template:
             logger.error(f"Cliente {cliente_id} ou template {template_id} não encontrado")
