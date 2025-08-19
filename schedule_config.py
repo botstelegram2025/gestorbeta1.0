@@ -173,70 +173,130 @@ Esta limpeza remove mensagens antigas da fila que não foram enviadas.
             self.bot.send_message(chat_id, "❌ Erro ao configurar horário.")
 
     def set_horario_envio(self, chat_id, novo_horario):
-        """Define novo horário de envio"""
+        """Define novo horário de envio com isolamento por usuário"""
         try:
             hora = int(novo_horario[:2])
             minuto = int(novo_horario[2:])
+            horario_formatado = f"{hora:02d}:{minuto:02d}"
             
-            # Salvar configuração no banco
-            self.bot.db.salvar_configuracao('horario_envio', f'{novo_horario[:2]}:{novo_horario[2:]}')
-            
-            # Salvar nova configuração e notificar sucesso
-            mensagem = f"✅ Horário de envio alterado para {novo_horario[:2]}:{novo_horario[2:]}!\n\n"
-            mensagem += "📅 O novo horário será aplicado automaticamente.\n"
-            mensagem += "⚠️ IMPORTANTE: Reinicie o bot para aplicar a mudança completa."
-            
-            self.bot.send_message(chat_id, mensagem)
-            # Voltar ao menu de horários
-            self.config_horarios_menu(chat_id)
+            # Salvar configuração com isolamento por usuário
+            try:
+                with self.bot.db.get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        # Deletar configuração existente do usuário
+                        cursor.execute('''
+                            DELETE FROM configuracoes 
+                            WHERE chave = %s AND chat_id_usuario = %s
+                        ''', ('horario_envio_diario', chat_id))
+                        
+                        # Inserir nova configuração
+                        cursor.execute('''
+                            INSERT INTO configuracoes (chave, valor, descricao, chat_id_usuario)
+                            VALUES (%s, %s, %s, %s)
+                        ''', ('horario_envio_diario', horario_formatado, f'Horário personalizado do usuário', chat_id))
+                        
+                        conn.commit()
+                
+                mensagem = f"✅ Horário de envio alterado para {horario_formatado}!\n\n"
+                mensagem += "📅 O novo horário foi aplicado ao seu perfil.\n"
+                mensagem += "🔄 Configuração ativa imediatamente.\n\n"
+                mensagem += f"👤 Usuário: {chat_id} - horário isolado"
+                
+                self.bot.send_message(chat_id, mensagem)
+                # Voltar ao menu de horários
+                self.config_horarios_menu(chat_id)
+                
+            except Exception as db_error:
+                logger.error(f"Erro de banco ao salvar horário de envio: {db_error}")
+                self.bot.send_message(chat_id, f"❌ Erro no banco: {db_error}")
             
         except Exception as e:
             logger.error(f"Erro ao definir horário de envio: {e}")
-            self.bot.send_message(chat_id, "❌ Erro ao alterar horário.")
+            self.bot.send_message(chat_id, f"❌ Erro ao alterar horário: {e}")
 
     def set_horario_verificacao(self, chat_id, novo_horario):
-        """Define novo horário de verificação"""
+        """Define novo horário de verificação com isolamento por usuário"""
         try:
             hora = int(novo_horario[:2])
             minuto = int(novo_horario[2:])
+            horario_formatado = f"{hora:02d}:{minuto:02d}"
             
-            # Salvar configuração no banco
-            self.bot.db.salvar_configuracao('horario_verificacao', f'{novo_horario[:2]}:{novo_horario[2:]}')
-            
-            # Salvar nova configuração e notificar sucesso
-            mensagem = f"✅ Horário de verificação alterado para {novo_horario[:2]}:{novo_horario[2:]}!\n\n"
-            mensagem += "📅 O novo horário será aplicado automaticamente.\n"
-            mensagem += "⚠️ IMPORTANTE: Reinicie o bot para aplicar a mudança completa."
-            
-            self.bot.send_message(chat_id, mensagem)
-            # Voltar ao menu de horários
-            self.config_horarios_menu(chat_id)
+            # Salvar configuração com isolamento por usuário
+            try:
+                with self.bot.db.get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        # Deletar configuração existente do usuário
+                        cursor.execute('''
+                            DELETE FROM configuracoes 
+                            WHERE chave = %s AND chat_id_usuario = %s
+                        ''', ('horario_verificacao_diaria', chat_id))
+                        
+                        # Inserir nova configuração
+                        cursor.execute('''
+                            INSERT INTO configuracoes (chave, valor, descricao, chat_id_usuario)
+                            VALUES (%s, %s, %s, %s)
+                        ''', ('horario_verificacao_diaria', horario_formatado, f'Horário personalizado do usuário', chat_id))
+                        
+                        conn.commit()
+                
+                mensagem = f"✅ Horário de verificação alterado para {horario_formatado}!\n\n"
+                mensagem += "📅 O novo horário foi aplicado ao seu perfil.\n"
+                mensagem += "🔄 Configuração ativa imediatamente.\n\n"
+                mensagem += f"👤 Usuário: {chat_id} - horário isolado"
+                
+                self.bot.send_message(chat_id, mensagem)
+                # Voltar ao menu de horários
+                self.config_horarios_menu(chat_id)
+                
+            except Exception as db_error:
+                logger.error(f"Erro de banco ao salvar horário de verificação: {db_error}")
+                self.bot.send_message(chat_id, f"❌ Erro no banco: {db_error}")
             
         except Exception as e:
             logger.error(f"Erro ao definir horário de verificação: {e}")
-            self.bot.send_message(chat_id, "❌ Erro ao alterar horário.")
+            self.bot.send_message(chat_id, f"❌ Erro ao alterar horário: {e}")
 
     def set_horario_limpeza(self, chat_id, novo_horario):
-        """Define novo horário de limpeza"""
+        """Define novo horário de limpeza com isolamento por usuário"""
         try:
             hora = int(novo_horario[:2])
             minuto = int(novo_horario[2:])
+            horario_formatado = f"{hora:02d}:{minuto:02d}"
             
-            # Salvar configuração no banco
-            self.bot.db.salvar_configuracao('horario_limpeza', f'{novo_horario[:2]}:{novo_horario[2:]}')
-            
-            # Salvar nova configuração e notificar sucesso
-            mensagem = f"✅ Horário de limpeza alterado para {novo_horario[:2]}:{novo_horario[2:]}!\n\n"
-            mensagem += "📅 O novo horário será aplicado automaticamente.\n"
-            mensagem += "⚠️ IMPORTANTE: Reinicie o bot para aplicar a mudança completa."
-            
-            self.bot.send_message(chat_id, mensagem)
-            # Voltar ao menu de horários
-            self.config_horarios_menu(chat_id)
+            # Salvar configuração com isolamento por usuário
+            try:
+                with self.bot.db.get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        # Deletar configuração existente do usuário
+                        cursor.execute('''
+                            DELETE FROM configuracoes 
+                            WHERE chave = %s AND chat_id_usuario = %s
+                        ''', ('horario_limpeza_fila', chat_id))
+                        
+                        # Inserir nova configuração
+                        cursor.execute('''
+                            INSERT INTO configuracoes (chave, valor, descricao, chat_id_usuario)
+                            VALUES (%s, %s, %s, %s)
+                        ''', ('horario_limpeza_fila', horario_formatado, f'Horário personalizado do usuário', chat_id))
+                        
+                        conn.commit()
+                
+                mensagem = f"✅ Horário de limpeza alterado para {horario_formatado}!\n\n"
+                mensagem += "📅 O novo horário foi aplicado ao seu perfil.\n"
+                mensagem += "🔄 Configuração ativa imediatamente.\n\n"
+                mensagem += f"👤 Usuário: {chat_id} - horário isolado"
+                
+                self.bot.send_message(chat_id, mensagem)
+                # Voltar ao menu de horários
+                self.config_horarios_menu(chat_id)
+                
+            except Exception as db_error:
+                logger.error(f"Erro de banco ao salvar horário de limpeza: {db_error}")
+                self.bot.send_message(chat_id, f"❌ Erro no banco: {db_error}")
             
         except Exception as e:
             logger.error(f"Erro ao definir horário de limpeza: {e}")
-            self.bot.send_message(chat_id, "❌ Erro ao alterar horário.")
+            self.bot.send_message(chat_id, f"❌ Erro ao alterar horário: {e}")
 
     def recriar_jobs(self, chat_id):
         """Recria todos os jobs do agendador com limpeza completa"""

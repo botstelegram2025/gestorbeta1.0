@@ -29,18 +29,22 @@ class SimpleScheduler:
         """Inicia o agendador"""
         try:
             if not self.running:
-                # Job de notificações às 9h05
+                # Buscar horário personalizado do banco (padrão 9:05 se não encontrar)
+                horario_verificacao = self._buscar_horario_verificacao()
+                hora, minuto = map(int, horario_verificacao.split(':'))
+                
+                # Job de notificações no horário configurado
                 self.scheduler.add_job(
                     func=self._notificar_usuarios_diario,
-                    trigger=CronTrigger(hour=9, minute=5),
+                    trigger=CronTrigger(hour=hora, minute=minuto),
                     id='notificar_usuarios',
-                    name='Notificações Diárias 9h05',
+                    name=f'Notificações Diárias {horario_verificacao}',
                     replace_existing=True
                 )
                 
                 self.scheduler.start()
                 self.running = True
-                logger.info("✅ Agendador simplificado iniciado: Notificações 9h05")
+                logger.info(f"✅ Agendador iniciado: Notificações {horario_verificacao}")
                 
         except Exception as e:
             logger.error(f"Erro ao iniciar agendador: {e}")
@@ -54,6 +58,66 @@ class SimpleScheduler:
                 logger.info("Agendador parado")
         except Exception as e:
             logger.error(f"Erro ao parar agendador: {e}")
+    
+    def _buscar_horario_verificacao(self):
+        """Busca horário personalizado de verificação do banco"""
+        try:
+            with self.db.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT valor FROM configuracoes 
+                        WHERE chave = 'horario_verificacao_diaria' 
+                        AND chat_id_usuario IS NULL
+                        ORDER BY id DESC LIMIT 1
+                    """)
+                    resultado = cursor.fetchone()
+                    
+                    if resultado:
+                        return resultado[0]
+                    else:
+                        return "09:05"  # Padrão
+        except Exception as e:
+            logger.error(f"Erro ao buscar horário: {e}")
+            return "09:05"  # Padrão em caso de erro
+    
+    def recriar_jobs(self, novo_horario_verificacao=None):
+        """Recria os jobs com novos horários"""
+        try:
+            # Parar scheduler atual
+            if self.running:
+                self.scheduler.shutdown()
+                self.running = False
+                logger.info("Scheduler parado para recriar jobs")
+            
+            # Criar novo scheduler
+            self.scheduler = BackgroundScheduler(timezone=pytz.timezone('America/Sao_Paulo'))
+            
+            # Buscar horário (usar novo se fornecido)
+            if novo_horario_verificacao:
+                horario = novo_horario_verificacao
+            else:
+                horario = self._buscar_horario_verificacao()
+                
+            hora, minuto = map(int, horario.split(':'))
+            
+            # Recriar job
+            self.scheduler.add_job(
+                func=self._notificar_usuarios_diario,
+                trigger=CronTrigger(hour=hora, minute=minuto),
+                id='notificar_usuarios',
+                name=f'Notificações Diárias {horario}',
+                replace_existing=True
+            )
+            
+            # Reiniciar
+            self.scheduler.start()
+            self.running = True
+            logger.info(f"✅ Jobs recriados: Notificações {horario}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro ao recriar jobs: {e}")
+            return False
     
     def _notificar_usuarios_diario(self):
         """Notifica cada usuário sobre seus clientes vencendo"""
