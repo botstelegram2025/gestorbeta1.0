@@ -18,17 +18,48 @@ class ScheduleConfig:
         """Menu principal de configuração de horários"""
         try:
             agora = datetime.now(self.timezone)
+            
+            # Buscar horários personalizados do usuário
+            horario_envio = "09:00"
+            horario_verificacao = "09:00"
+            horario_limpeza = "02:00"
+            
+            try:
+                with self.bot.db.get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        # Buscar horários personalizados
+                        cursor.execute('''
+                            SELECT chave, valor FROM configuracoes 
+                            WHERE chat_id_usuario = %s
+                            AND chave IN ('horario_envio_diario', 'horario_verificacao_diaria', 'horario_limpeza_fila')
+                        ''', (chat_id,))
+                        
+                        configs = cursor.fetchall()
+                        for config in configs:
+                            if config[0] == 'horario_envio_diario':
+                                horario_envio = config[1]
+                            elif config[0] == 'horario_verificacao_diaria':
+                                horario_verificacao = config[1]
+                            elif config[0] == 'horario_limpeza_fila':
+                                horario_limpeza = config[1]
+            except:
+                pass  # Usar horários padrão se falhar
+            
             mensagem = f"""⏰ CONFIGURAÇÕES DE HORÁRIOS
 
-📅 Horários Atuais (Brasília):
-🕘 Envio Diário: 09:00
+📅 Seus Horários Atuais (Brasília):
+🕘 Envio Diário: {horario_envio}
    └ Mensagens são enviadas automaticamente
 
-🕔 Verificação: 09:00  
+🕔 Verificação: {horario_verificacao}  
    └ Sistema verifica vencimentos e adiciona à fila
 
-🕚 Limpeza: 02:00
+🕚 Limpeza: {horario_limpeza}
    └ Remove mensagens antigas da fila
+
+💡 EXEMPLO DE CONFIGURAÇÃO PERSONALIZADA:
+   • Verificação: 18:00 (detecta vencimentos)
+   • Envio: 18:10 (envia 10 minutos depois)
 
 🌍 Timezone: America/Sao_Paulo
 ⏱️ Horário atual: {agora.strftime('%H:%M:%S')}
@@ -66,29 +97,55 @@ class ScheduleConfig:
     def edit_horario_envio(self, chat_id):
         """Configurar horário de envio de mensagens"""
         try:
-            mensagem = """📤 ALTERAR HORÁRIO DE ENVIO
+            # Buscar horário atual do usuário
+            horario_atual = "09:00"
+            try:
+                with self.bot.db.get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute('''
+                            SELECT valor FROM configuracoes 
+                            WHERE chat_id_usuario = %s AND chave = 'horario_envio_diario'
+                        ''', (chat_id,))
+                        resultado = cursor.fetchone()
+                        if resultado:
+                            horario_atual = resultado[0]
+            except:
+                pass
+                
+            mensagem = f"""📤 ALTERAR HORÁRIO DE ENVIO
 
-⏰ Atual: 9:00 AM (Brasília)
+⏰ Atual: {horario_atual} (Brasília)
 
 Este horário define quando as mensagens da fila são processadas e enviadas via WhatsApp.
 
-💡 Recomendações:
-• Horário comercial (8h-18h)
-• Evitar madrugada e noite
-• Considere o perfil dos seus clientes
+💡 Recomendações para configuração sequencial:
+   • Se verificação às 18:00 → Envio às 18:10
+   • Se verificação às 09:00 → Envio às 09:15
+   • Deixe alguns minutos entre verificação e envio
+
+🎯 HORÁRIOS POPULARES:
+   • 09:00 (manhã) • 12:00 (almoço) • 18:00 (final tarde)
 
 🕐 Escolha o novo horário:"""
 
             inline_keyboard = []
-            horarios = ['06:00', '07:00', '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00']
             
-            # Criar botões de horário em linhas de 3
-            for i in range(0, len(horarios), 3):
+            # Horários populares incluindo sequências de 18:00-18:10
+            horarios_populares = [
+                ['09:00', '09:15', '12:00'],
+                ['14:00', '16:00', '17:00'], 
+                ['17:28', '18:00', '18:10'],
+                ['19:00', '20:00', '21:00']
+            ]
+            
+            # Adicionar horários populares
+            for linha_horarios in horarios_populares:
                 linha = []
-                for j in range(3):
-                    if i + j < len(horarios):
-                        horario = horarios[i + j]
-                        linha.append({'text': horario, 'callback_data': f'set_envio_{horario.replace(":", "")}'})
+                for horario in linha_horarios:
+                    linha.append({
+                        'text': f'🕐 {horario}',
+                        'callback_data': f'set_envio_{horario.replace(":", "")}'
+                    })
                 inline_keyboard.append(linha)
 
             # Adicionar opção personalizada
@@ -104,27 +161,54 @@ Este horário define quando as mensagens da fila são processadas e enviadas via
     def edit_horario_verificacao(self, chat_id):
         """Configurar horário de verificação diária"""
         try:
-            mensagem = """🔔 ALTERAR HORÁRIO DE VERIFICAÇÃO
+            # Buscar horário atual do usuário
+            horario_atual = "09:00"
+            try:
+                with self.bot.db.get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute('''
+                            SELECT valor FROM configuracoes 
+                            WHERE chat_id_usuario = %s AND chave = 'horario_verificacao_diaria'
+                        ''', (chat_id,))
+                        resultado = cursor.fetchone()
+                        if resultado:
+                            horario_atual = resultado[0]
+            except:
+                pass
+                
+            mensagem = f"""🔔 ALTERAR HORÁRIO DE VERIFICAÇÃO
 
-⏰ Atual: 9:00 AM (Brasília)
+⏰ Atual: {horario_atual} (Brasília)
 
 Esta verificação acontece uma vez por dia e:
-• Verifica todos os clientes vencendo
-• Agenda mensagens para o dia
-• Envia alerta para o administrador
+• Verifica todos os clientes vencidos
+• Agenda mensagens para envio posterior
+• Detecta vencimentos para notificação
+
+💡 CONFIGURAÇÃO SEQUENCIAL RECOMENDADA:
+   1. Verificação: 18:00 (detecta vencimentos)
+   2. Envio: 18:10 (processa 10 min depois)
 
 🕐 Escolha o novo horário:"""
 
             inline_keyboard = []
-            horarios = ['05:00', '06:00', '07:00', '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00']
             
-            # Criar botões de horário em linhas de 3
-            for i in range(0, len(horarios), 3):
+            # Horários específicos para verificação incluindo 18:00
+            horarios_verificacao = [
+                ['06:00', '07:00', '08:00'],
+                ['09:00', '12:00', '15:00'],
+                ['17:00', '18:00', '19:00'],
+                ['20:00', '21:00', '22:00']
+            ]
+            
+            # Adicionar horários de verificação
+            for linha_horarios in horarios_verificacao:
                 linha = []
-                for j in range(3):
-                    if i + j < len(horarios):
-                        horario = horarios[i + j]
-                        linha.append({'text': horario, 'callback_data': f'set_verificacao_{horario.replace(":", "")}'})
+                for horario in linha_horarios:
+                    linha.append({
+                        'text': f'🕐 {horario}',
+                        'callback_data': f'set_verificacao_{horario.replace(":", "")}'
+                    })
                 inline_keyboard.append(linha)
 
             # Adicionar opção personalizada
