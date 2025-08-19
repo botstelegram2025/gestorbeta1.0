@@ -85,9 +85,7 @@ class SimpleScheduler:
                     cursor.execute("""
                         SELECT DISTINCT chat_id 
                         FROM usuarios 
-                        WHERE status = 'ativo'
-                        AND data_fim_teste > NOW()
-                        OR assinatura_ativa = true
+                        WHERE status IN ('ativo', 'teste')
                     """)
                     resultados = cursor.fetchall()
                     return [{'chat_id': row[0]} for row in resultados]
