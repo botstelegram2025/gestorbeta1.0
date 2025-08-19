@@ -293,7 +293,7 @@ class MessageScheduler:
         """Processa clientes de um usuário específico"""
         try:
             # Verificar se este usuário tem horário personalizado de envio
-            horario_usuario = self._get_horario_config_usuario('horario_envio', chat_id_usuario, None)
+            horario_usuario = self._get_horario_config_usuario('horario_envio', chat_id_usuario, '09:00')
             hora_atual = agora_br().strftime('%H:%M')
             
             if horario_usuario and horario_usuario != hora_atual[:5]:  # Comparar HH:MM
@@ -399,9 +399,6 @@ class MessageScheduler:
                     logger.error(f"Erro ao processar cliente {cliente['nome']}: {e}")
             
             logger.info(f"=== ENVIO CONCLUÍDO: {enviadas} mensagens enviadas às 9h ===")
-            
-        except Exception as e:
-            logger.error(f"Erro no envio diário às 9h: {e}")
     
     def processar_todos_vencidos(self, forcar_reprocesso=False):
         """Processa TODOS os clientes vencidos, mesmo os com mais de 1 dia (usado quando horário é alterado)"""
@@ -938,7 +935,7 @@ Renove agora e mantenha tudo funcionando! 👇"""
             logger.info(f"Enviando alerta diário para usuário {chat_id_usuario}...")
             
             # Verificar se este usuário tem horário personalizado de alerta
-            horario_alerta_usuario = self._get_horario_config_usuario('horario_verificacao', chat_id_usuario, None)
+            horario_alerta_usuario = self._get_horario_config_usuario('horario_verificacao', chat_id_usuario, '09:00')
             if horario_alerta_usuario:
                 hora_atual = agora_br().strftime('%H:%M')
                 if horario_alerta_usuario != hora_atual[:5]:  # Comparar HH:MM
@@ -1007,12 +1004,8 @@ Renove agora e mantenha tudo funcionando! 👇"""
 
 💡 Use o comando `/vencimentos` para ver detalhes"""
                 
-                # Enviar via bot Telegram (usando instância global)
-                admin_chat_id = os.getenv('ADMIN_CHAT_ID')
-                if admin_chat_id:
-                    self._enviar_para_admin(admin_chat_id, mensagem)
-                else:
-                    logger.warning("ADMIN_CHAT_ID não configurado para alerta")
+                # CORREÇÃO CRÍTICA: Enviar para o USUÁRIO específico, não para o admin
+                self._enviar_para_usuario(chat_id_usuario, mensagem)
             else:
                 # Enviar confirmação de que não há vencimentos
                 mensagem = f"""✅ *RELATÓRIO DIÁRIO*
@@ -1023,14 +1016,42 @@ Renove agora e mantenha tudo funcionando! 👇"""
 
 Tudo sob controle! 👍"""
                 
-                admin_chat_id = os.getenv('ADMIN_CHAT_ID')
-                if admin_chat_id:
-                    self._enviar_para_admin(admin_chat_id, mensagem)
+                # CORREÇÃO CRÍTICA: Enviar para o USUÁRIO específico, não para o admin
+                self._enviar_para_usuario(chat_id_usuario, mensagem)
             
-            logger.info("Alerta diário enviado para administrador")
+            logger.info(f"Alerta diário enviado para usuário {chat_id_usuario}")
             
         except Exception as e:
             logger.error(f"Erro ao enviar alerta para administrador: {e}")
+    
+    def _enviar_para_usuario(self, chat_id_usuario, mensagem):
+        """Envia mensagem para um usuário específico via Telegram"""
+        try:
+            # Importar aqui para evitar dependência circular
+            import requests
+            import os
+            
+            bot_token = os.getenv('BOT_TOKEN')
+            if not bot_token:
+                logger.error("BOT_TOKEN não configurado para envio de alerta")
+                return
+            
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            data = {
+                'chat_id': chat_id_usuario,
+                'text': mensagem,
+                'parse_mode': 'Markdown'
+            }
+            
+            response = requests.post(url, data=data, timeout=10)
+            
+            if response.status_code == 200:
+                logger.info(f"Notificação enviada com sucesso para usuário {chat_id_usuario}")
+            else:
+                logger.error(f"Erro ao enviar notificação: {response.status_code} - {response.text}")
+                
+        except Exception as e:
+            logger.error(f"Erro ao enviar mensagem para usuário {chat_id_usuario}: {e}")
     
     def _enviar_para_admin(self, admin_chat_id, mensagem):
         """Envia mensagem para o administrador via Telegram"""

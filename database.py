@@ -1512,8 +1512,8 @@ _Obrigado por escolher nossos serviços!_ ✨""",
             logger.error(f"Erro ao criar template: {e}")
             raise
     
-    def atualizar_template(self, template_id, nome=None, descricao=None, conteudo=None):
-        """Atualiza template"""
+    def atualizar_template(self, template_id, nome=None, descricao=None, conteudo=None, chat_id_usuario=None):
+        """Atualiza template com isolamento por usuário"""
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
@@ -1536,13 +1536,23 @@ _Obrigado por escolher nossos serviços!_ ✨""",
                         return False
                     
                     campos.append("data_atualizacao = CURRENT_TIMESTAMP")
-                    valores.append(template_id)
+                    
+                    where_conditions = ["id = %s"]
+                    where_params = [template_id]
+                    
+                    # CRÍTICO: Aplicar isolamento por usuário se especificado
+                    if chat_id_usuario is not None:
+                        where_conditions.append("chat_id_usuario = %s")
+                        where_params.append(chat_id_usuario)
+                    
+                    where_clause = " AND ".join(where_conditions)
                     
                     query = f"""
                         UPDATE templates 
                         SET {', '.join(campos)}
-                        WHERE id = %s
+                        WHERE {where_clause}
                     """
+                    valores.extend(where_params)
                     
                     cursor.execute(query, valores)
                     conn.commit()
@@ -1553,8 +1563,8 @@ _Obrigado por escolher nossos serviços!_ ✨""",
             logger.error(f"Erro ao atualizar template: {e}")
             raise
     
-    def atualizar_template_campo(self, template_id, campo, valor):
-        """Atualiza campo específico do template"""
+    def atualizar_template_campo(self, template_id, campo, valor, chat_id_usuario=None):
+        """Atualiza campo específico do template com isolamento por usuário"""
         try:
             campos_validos = ['nome', 'descricao', 'conteudo', 'tipo', 'ativo']
             if campo not in campos_validos:
@@ -1562,20 +1572,30 @@ _Obrigado por escolher nossos serviços!_ ✨""",
             
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
+                    where_conditions = ["id = %s"]
+                    params = [valor, template_id]
+                    
+                    # CRÍTICO: Aplicar isolamento por usuário se especificado
+                    if chat_id_usuario is not None:
+                        where_conditions.append("chat_id_usuario = %s")
+                        params.append(chat_id_usuario)
+                    
+                    where_clause = " AND ".join(where_conditions)
+                    
                     query = f"""
                         UPDATE templates 
                         SET {campo} = %s, data_atualizacao = CURRENT_TIMESTAMP
-                        WHERE id = %s
+                        WHERE {where_clause}
                     """
                     
-                    cursor.execute(query, (valor, template_id))
+                    cursor.execute(query, params)
                     conn.commit()
                     
                     if cursor.rowcount == 0:
-                        logger.warning(f"Template ID {template_id} não encontrado para atualização")
+                        logger.warning(f"Template ID {template_id} não encontrado para atualização ou não pertence ao usuário {chat_id_usuario}")
                         return False
                     
-                    logger.info(f"Template ID {template_id} - campo '{campo}' atualizado")
+                    logger.info(f"Template ID {template_id} - campo '{campo}' atualizado para usuário {chat_id_usuario}")
                     return True
                     
         except Exception as e:
