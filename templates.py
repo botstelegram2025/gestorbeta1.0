@@ -69,19 +69,18 @@ class TemplateManager:
             logger.error(f"Erro ao buscar template {template_id}: {e}")
             return None
     
-    def excluir_template(self, template_id, chat_id_usuario=None):
-        """Exclui template definitivamente com isolamento por usuário"""
+    def excluir_template(self, template_id):
+        """Exclui template definitivamente"""
         try:
-            self.db.excluir_template(template_id, chat_id_usuario)
-            return True
+            return self.db.excluir_template(template_id)
         except Exception as e:
             logger.error(f"Erro ao excluir template {template_id}: {e}")
             return False
     
-    def atualizar_campo(self, template_id, campo, valor, chat_id_usuario=None):
-        """Atualiza campo específico do template com isolamento por usuário"""
+    def atualizar_campo(self, template_id, campo, valor):
+        """Atualiza campo específico do template"""
         try:
-            return self.db.atualizar_template_campo(template_id, campo, valor, chat_id_usuario)
+            return self.db.atualizar_template_campo(template_id, campo, valor)
         except Exception as e:
             logger.error(f"Erro ao atualizar campo {campo} do template {template_id}: {e}")
             return False
@@ -110,8 +109,8 @@ class TemplateManager:
             logger.error(f"Erro ao criar template: {e}")
             raise
     
-    def atualizar_template(self, template_id, nome=None, descricao=None, conteudo=None, chat_id_usuario=None):
-        """Atualiza template existente com isolamento por usuário"""
+    def atualizar_template(self, template_id, nome=None, descricao=None, conteudo=None):
+        """Atualiza template existente"""
         try:
             # Validar conteúdo se fornecido
             if conteudo:
@@ -119,9 +118,9 @@ class TemplateManager:
                 if erros_validacao:
                     raise ValueError(f"Erros no template: {', '.join(erros_validacao)}")
             
-            sucesso = self.db.atualizar_template(template_id, nome, descricao, conteudo, chat_id_usuario)
+            sucesso = self.db.atualizar_template(template_id, nome, descricao, conteudo)
             if sucesso:
-                logger.info(f"Template {template_id} atualizado com sucesso para usuário {chat_id_usuario}")
+                logger.info(f"Template {template_id} atualizado com sucesso")
             return sucesso
             
         except Exception as e:
