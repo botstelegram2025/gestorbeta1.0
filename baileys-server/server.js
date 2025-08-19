@@ -15,8 +15,8 @@ app.use(express.json());
 // Estado global para múltiplas sessões - CADA USUÁRIO TEM SUA PRÓPRIA SESSÃO
 const sessions = new Map(); // sessionId -> { sock, qrCode, isConnected, status, backupInterval }
 
-// Sistema de backup da sessão para PostgreSQL (por sessão específica)
-const saveSessionToDatabase = async (sessionId) => {
+// Sistema ROBUSTO de backup da sessão - com retry e fallback
+const saveSessionToDatabase = async (sessionId, retries = 3) => {
     try {
         const authPath = `./auth_info_${sessionId}`;
         if (!fs.existsSync(authPath)) return;
@@ -32,57 +32,98 @@ const saveSessionToDatabase = async (sessionId) => {
             }
         }
 
-        // Salvar no banco via API Python com ID da sessão
+        // Salvar no banco via API Python com retry automático
         if (Object.keys(sessionData).length > 0) {
-            try {
-                const response = await fetch('http://localhost:5000/api/session/backup', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        session_data: sessionData,
-                        session_id: sessionId
-                    }),
-                    timeout: 5000
-                });
-                
-                if (response.ok) {
-                    console.log(`💾 Sessão ${sessionId} salva no banco de dados`);
-                } else {
-                    console.log(`⚠️ Falha ao salvar sessão ${sessionId}: ${response.status}`);
+            for (let attempt = 1; attempt <= retries; attempt++) {
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+                    
+                    const response = await fetch('http://localhost:5000/api/session/backup', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            session_data: sessionData,
+                            session_id: sessionId
+                        }),
+                        signal: controller.signal
+                    });
+                    
+                    clearTimeout(timeoutId);
+                    
+                    if (response.ok) {
+                        console.log(`💾 Sessão ${sessionId} salva no banco (tentativa ${attempt})`);
+                        return true; // Sucesso - sair do loop
+                    } else {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                } catch (fetchError) {
+                    console.log(`⚠️ Tentativa ${attempt}/${retries} falhou para ${sessionId}: ${fetchError.message}`);
+                    
+                    if (attempt === retries) {
+                        // Última tentativa - log final
+                        console.log(`❌ FALHA DEFINITIVA ao salvar sessão ${sessionId} após ${retries} tentativas`);
+                        return false;
+                    }
+                    
+                    // Aguardar antes da próxima tentativa (backoff exponencial)
+                    await new Promise(resolve => setTimeout(resolve, attempt * 2000));
                 }
-            } catch (fetchError) {
-                console.log(`⚠️ Erro de rede ao salvar sessão ${sessionId}:`, fetchError.message);
             }
         }
     } catch (error) {
-        console.log(`⚠️ Erro ao salvar sessão ${sessionId}:`, error.message);
+        console.log(`⚠️ Erro interno ao salvar sessão ${sessionId}:`, error.message);
+        return false;
     }
 };
 
-// Restaurar sessão do banco de dados (por sessão específica)
-const restoreSessionFromDatabase = async (sessionId) => {
-    try {
-        const response = await fetch(`http://localhost:5000/api/session/restore?session_id=${sessionId}`);
-        if (response.ok) {
-            const { session_data } = await response.json();
+// Restaurar sessão ROBUSTA do banco de dados com retry
+const restoreSessionFromDatabase = async (sessionId, retries = 3) => {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
             
-            if (session_data && Object.keys(session_data).length > 0) {
-                const authPath = `./auth_info_${sessionId}`;
-                if (!fs.existsSync(authPath)) {
-                    fs.mkdirSync(authPath, { recursive: true });
-                }
-
-                for (const [filename, content] of Object.entries(session_data)) {
-                    const filePath = path.join(authPath, filename);
-                    fs.writeFileSync(filePath, content);
-                }
+            const response = await fetch(`http://localhost:5000/api/session/restore?session_id=${sessionId}`, {
+                signal: controller.signal
+            });
+            
+            clearTimeout(timeoutId);
+            
+            if (response.ok) {
+                const { session_data } = await response.json();
                 
-                console.log(`🔄 Sessão ${sessionId} restaurada do banco de dados`);
-                return true;
+                if (session_data && Object.keys(session_data).length > 0) {
+                    const authPath = `./auth_info_${sessionId}`;
+                    if (!fs.existsSync(authPath)) {
+                        fs.mkdirSync(authPath, { recursive: true });
+                    }
+
+                    for (const [filename, content] of Object.entries(session_data)) {
+                        const filePath = path.join(authPath, filename);
+                        fs.writeFileSync(filePath, content);
+                    }
+                    
+                    console.log(`🔄 Sessão ${sessionId} restaurada do banco (tentativa ${attempt})`);
+                    return true;
+                }
+            } else if (response.status === 404) {
+                console.log(`ℹ️ Nenhuma sessão ${sessionId} encontrada no banco`);
+                return false; // Não é erro - simplesmente não existe
+            } else {
+                throw new Error(`HTTP ${response.status}`);
             }
+        } catch (error) {
+            console.log(`⚠️ Tentativa ${attempt}/${retries} de restaurar ${sessionId}: ${error.message}`);
+            
+            if (attempt === retries) {
+                console.log(`❌ FALHA ao restaurar sessão ${sessionId} após ${retries} tentativas`);
+                return false;
+            }
+            
+            // Aguardar antes da próxima tentativa
+            await new Promise(resolve => setTimeout(resolve, attempt * 1000));
         }
-    } catch (error) {
-        console.log(`⚠️ Erro ao restaurar sessão ${sessionId}:`, error.message);
     }
     return false;
 };
@@ -143,11 +184,19 @@ const connectToWhatsApp = async (sessionId) => {
         const session = sessions.get(sessionId);
         session.sock = sock;
 
-        // Salvar credenciais quando necessário
+        // Salvar credenciais quando necessário - COM THROTTLING
+        let lastBackup = 0;
         sock.ev.on('creds.update', async () => {
             await saveCreds();
-            // Backup automático a cada atualização de credenciais
-            await saveSessionToDatabase(sessionId);
+            
+            // Throttling: só fazer backup a cada 30 segundos
+            const now = Date.now();
+            if (now - lastBackup > 30000) { // 30 segundos
+                lastBackup = now;
+                saveSessionToDatabase(sessionId).catch(err => {
+                    console.log(`⚠️ Backup creds ${sessionId} falhou:`, err.message);
+                });
+            }
         });
 
         // Gerenciar conexão específica por sessão
@@ -185,12 +234,20 @@ const connectToWhatsApp = async (sessionId) => {
                 session.qrCode = '';
                 console.log(`✅ Sessão ${sessionId} - WhatsApp conectado!`);
                 
-                // Configurar backup automático
+                // Configurar backup automático ROBUSTO (a cada 5 minutos)
                 if (session.backupInterval) clearInterval(session.backupInterval);
-                session.backupInterval = setInterval(() => saveSessionToDatabase(sessionId), 2 * 60 * 1000);
+                session.backupInterval = setInterval(() => {
+                    saveSessionToDatabase(sessionId).catch(err => {
+                        console.log(`⚠️ Backup automático ${sessionId} falhou:`, err.message);
+                    });
+                }, 5 * 60 * 1000); // 5 minutos
                 
-                // Fazer backup imediato após conectar
-                setTimeout(() => saveSessionToDatabase(sessionId), 5000);
+                // Fazer backup imediato após conectar (com delay maior)
+                setTimeout(() => {
+                    saveSessionToDatabase(sessionId).catch(err => {
+                        console.log(`⚠️ Backup inicial ${sessionId} falhou:`, err.message);
+                    });
+                }, 10000); // 10 segundos
                 console.log(`📞 Sessão ${sessionId} - Número:`, session.sock.user.id);
             } else if (connection === 'connecting') {
                 if (session.status !== 'connecting') {
