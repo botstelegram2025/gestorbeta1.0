@@ -181,30 +181,10 @@ Esta limpeza remove mensagens antigas da fila que não foram enviadas.
             # Salvar configuração no banco
             self.bot.db.salvar_configuracao('horario_envio', f'{novo_horario[:2]}:{novo_horario[2:]}')
             
-            # IMPORTANTE: Processar todos os clientes vencidos agora que mudou o horário
-            if hasattr(self.bot, 'scheduler') and self.bot.scheduler:
-                logger.info(f"Horário de envio alterado para {novo_horario[:2]}:{novo_horario[2:]} - processando todos os vencidos...")
-                
-                # Processar todos os clientes vencidos imediatamente
-                enviadas = self.bot.scheduler.processar_todos_vencidos(forcar_reprocesso=False)
-                
-                from apscheduler.triggers.cron import CronTrigger
-                
-                # Atualizar o job original com novo horário
-                self.bot.scheduler.scheduler.add_job(
-                    func=self.bot.scheduler._processar_envio_diario_9h,
-                    trigger=CronTrigger(hour=hora, minute=minuto, timezone=self.bot.scheduler.scheduler.timezone),
-                    id='envio_diario_9h',  # Usar o ID original
-                    name=f'Envio Diário às {novo_horario[:2]}:{novo_horario[2:]}',
-                    replace_existing=True
-                )
-                
-                mensagem = f"✅ Horário de envio alterado para {novo_horario[:2]}:{novo_horario[2:]}!\n\n"
-                if enviadas > 0:
-                    mensagem += f"📧 {enviadas} mensagens enviadas para clientes vencidos\n"
-                mensagem += f"📅 Próximo envio: {self._get_next_run_time('envio_diario_9h')}"
-            else:
-                mensagem = "❌ Agendador não disponível."
+            # Salvar nova configuração e notificar sucesso
+            mensagem = f"✅ Horário de envio alterado para {novo_horario[:2]}:{novo_horario[2:]}!\n\n"
+            mensagem += "📅 O novo horário será aplicado automaticamente.\n"
+            mensagem += "⚠️ IMPORTANTE: Reinicie o bot para aplicar a mudança completa."
             
             self.bot.send_message(chat_id, mensagem)
             # Voltar ao menu de horários
@@ -223,30 +203,10 @@ Esta limpeza remove mensagens antigas da fila que não foram enviadas.
             # Salvar configuração no banco
             self.bot.db.salvar_configuracao('horario_verificacao', f'{novo_horario[:2]}:{novo_horario[2:]}')
             
-            # IMPORTANTE: Processar todos os clientes vencidos agora que mudou o horário
-            if hasattr(self.bot, 'scheduler') and self.bot.scheduler:
-                logger.info(f"Horário de verificação alterado para {novo_horario[:2]}:{novo_horario[2:]} - processando todos os vencidos...")
-                
-                # Processar todos os clientes vencidos imediatamente
-                enviadas = self.bot.scheduler.processar_todos_vencidos(forcar_reprocesso=False)
-                
-                from apscheduler.triggers.cron import CronTrigger
-                
-                # Atualizar o job original com novo horário
-                self.bot.scheduler.scheduler.add_job(
-                    func=self.bot.scheduler._enviar_alerta_admin,
-                    trigger=CronTrigger(hour=hora, minute=minuto, timezone=self.bot.scheduler.scheduler.timezone),
-                    id='alerta_admin',  # Usar o ID original
-                    name=f'Verificação Diária às {novo_horario[:2]}:{novo_horario[2:]}',
-                    replace_existing=True
-                )
-                
-                mensagem = f"✅ Horário de verificação alterado para {novo_horario[:2]}:{novo_horario[2:]}!\n\n"
-                if enviadas > 0:
-                    mensagem += f"📧 {enviadas} mensagens enviadas para clientes vencidos\n"
-                mensagem += f"📅 Próxima verificação: {self._get_next_run_time('alerta_admin')}"
-            else:
-                mensagem = "❌ Agendador não disponível."
+            # Salvar nova configuração e notificar sucesso
+            mensagem = f"✅ Horário de verificação alterado para {novo_horario[:2]}:{novo_horario[2:]}!\n\n"
+            mensagem += "📅 O novo horário será aplicado automaticamente.\n"
+            mensagem += "⚠️ IMPORTANTE: Reinicie o bot para aplicar a mudança completa."
             
             self.bot.send_message(chat_id, mensagem)
             # Voltar ao menu de horários
@@ -265,23 +225,10 @@ Esta limpeza remove mensagens antigas da fila que não foram enviadas.
             # Salvar configuração no banco
             self.bot.db.salvar_configuracao('horario_limpeza', f'{novo_horario[:2]}:{novo_horario[2:]}')
             
-            # Recriar job de limpeza com novo horário usando o ID original
-            if hasattr(self.bot, 'scheduler') and self.bot.scheduler:
-                from apscheduler.triggers.cron import CronTrigger
-                
-                # Atualizar o job original com novo horário
-                self.bot.scheduler.scheduler.add_job(
-                    func=self.bot.scheduler._limpar_fila_antiga,
-                    trigger=CronTrigger(hour=hora, minute=minuto, timezone=self.bot.scheduler.scheduler.timezone),
-                    id='limpar_fila',  # Usar o ID original
-                    name=f'Limpeza da Fila às {novo_horario[:2]}:{novo_horario[2:]}',
-                    replace_existing=True
-                )
-                
-                mensagem = f"✅ Horário de limpeza alterado para {novo_horario[:2]}:{novo_horario[2:]}!\n\n"
-                mensagem += f"📅 Próxima limpeza: {self._get_next_run_time('limpar_fila')}"
-            else:
-                mensagem = "❌ Agendador não disponível."
+            # Salvar nova configuração e notificar sucesso
+            mensagem = f"✅ Horário de limpeza alterado para {novo_horario[:2]}:{novo_horario[2:]}!\n\n"
+            mensagem += "📅 O novo horário será aplicado automaticamente.\n"
+            mensagem += "⚠️ IMPORTANTE: Reinicie o bot para aplicar a mudança completa."
             
             self.bot.send_message(chat_id, mensagem)
             # Voltar ao menu de horários
@@ -365,13 +312,9 @@ Esta limpeza remove mensagens antigas da fila que não foram enviadas.
                     self.bot.scheduler.scheduler.shutdown(wait=True)
                     self.bot.scheduler.running = False
                 
-                # Reiniciar com configurações padrão - incluir template_manager
-                from scheduler import MessageScheduler
-                self.bot.scheduler = MessageScheduler(
-                    self.bot.db, 
-                    self.bot, 
-                    template_manager=getattr(self.bot, 'template_manager', None)
-                )
+                # Reiniciar com configurações padrão
+                from scheduler_v2_simple import SimpleScheduler
+                self.bot.scheduler = SimpleScheduler(self.bot.db, self.bot)
                 logger.info(f"Jobs recriados com horários padrão para usuário {chat_id}")
             
             mensagem = f"""✅ SEUS HORÁRIOS FORAM RESETADOS!
@@ -580,7 +523,7 @@ Digite o horário desejado no formato HH:MM
             logger.error(f"Erro ao solicitar horário personalizado: {e}")
             self.bot.send_message(chat_id, "❌ Erro ao configurar horário personalizado.")
 
-    def processar_horario_personalizado(self, chat_id, texto):
+    def processar_horario_personalizado(self, chat_id, texto, estado=None):
         """Processa horário personalizado digitado pelo usuário"""
         try:
             import re
@@ -594,7 +537,7 @@ Digite o horário desejado no formato HH:MM
                     "Tente novamente:")
                 return False
                 
-            estado = self.bot.conversation_states.get(chat_id)
+            estado = estado or self.bot.conversation_states.get(chat_id)
             
             if estado == 'aguardando_horario_envio':
                 horario_sem_dois_pontos = texto.replace(':', '')

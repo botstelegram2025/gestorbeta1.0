@@ -33,6 +33,7 @@ class TemplateManager:
             'empresa_telefone': 'Telefone da empresa',
             'empresa_email': 'Email da empresa',
             'suporte_telefone': 'Telefone de suporte',
+            'suporte_email': 'Email de suporte',
             'pix_chave': 'Chave PIX para pagamento',
             'pix_beneficiario': 'Nome do beneficiário PIX'
         }
@@ -223,6 +224,7 @@ class TemplateManager:
         dados['empresa_telefone'] = configuracoes.get('empresa_telefone', '[CONFIGURAR TELEFONE]')
         dados['empresa_email'] = configuracoes.get('empresa_email', '[CONFIGURAR EMAIL]')
         dados['suporte_telefone'] = configuracoes.get('suporte_telefone', '[CONFIGURAR SUPORTE]')
+        dados['suporte_email'] = configuracoes.get('suporte_email', '[CONFIGURAR EMAIL SUPORTE]')
         dados['pix_chave'] = configuracoes.get('pix_chave', '[CONFIGURAR CHAVE PIX]')
         dados['pix_beneficiario'] = configuracoes.get('pix_beneficiario', '[CONFIGURAR BENEFICIÁRIO]')
         
@@ -238,6 +240,7 @@ class TemplateManager:
             config['empresa_telefone'] = self.db.obter_configuracao('empresa_telefone', '[CONFIGURAR TELEFONE]')
             config['empresa_email'] = self.db.obter_configuracao('empresa_email', '[CONFIGURAR EMAIL]')
             config['suporte_telefone'] = self.db.obter_configuracao('suporte_telefone', '[CONFIGURAR SUPORTE]')
+            config['suporte_email'] = self.db.obter_configuracao('suporte_email', '[CONFIGURAR EMAIL SUPORTE]')
             config['pix_chave'] = self.db.obter_configuracao('pix_chave', '[CONFIGURAR PIX]')
             config['pix_beneficiario'] = self.db.obter_configuracao('pix_beneficiario', '[CONFIGURAR BENEFICIÁRIO]')
             
