@@ -346,6 +346,11 @@ class MessageScheduler:
                             enviadas += 1
                             logger.info(f"💰 Cobrança enviada: {cliente['nome']} (vencido há 1 dia) - Usuário {chat_id_usuario}")
                     
+                    # Clientes vencidos há mais de 1 dia - IGNORAR (processo manual)
+                    elif dias_vencimento < -1:
+                        dias_vencido = abs(dias_vencimento)
+                        logger.debug(f"⏭️  {cliente['nome']} vencido há {dias_vencido} dias - ignorado (processo manual)")
+                    
                     # 2. Cliente vence hoje - Enviar alerta urgente
                     elif dias_vencimento == 0:
                         if self._enviar_mensagem_cliente(cliente, 'vencimento_hoje', chat_id_usuario):
@@ -376,68 +381,29 @@ class MessageScheduler:
         except Exception as e:
             logger.error(f"Erro ao processar clientes do usuário {chat_id_usuario}: {e}")
             return 0
-            
-            if not clientes:
-                logger.info("Nenhum cliente ativo encontrado")
-                return
-            
-            enviadas = 0
-            
-            for cliente in clientes:
-                try:
-                    vencimento = cliente['vencimento']
-                    dias_vencimento = (vencimento - hoje).days
-                    
-                    # Enviar mensagens conforme o padrão: 2, 1, 0, +1 dias
-                    
-                    # 1. Cliente vencido há exatamente 1 dia - Enviar cobrança
-                    if dias_vencimento == -1:
-                        if self._enviar_mensagem_cliente(cliente, 'vencimento_1dia_apos'):
-                            enviadas += 1
-                            logger.info(f"📧 Cobrança enviada: {cliente['nome']} (vencido há 1 dia)")
-                    
-                    # Clientes vencidos há mais de 1 dia são ignorados
-                    elif dias_vencimento < -1:
-                        logger.info(f"⏭️  {cliente['nome']} vencido há {abs(dias_vencimento)} dias - ignorado")
-                    
-                    # 2. Cliente vence hoje - Enviar alerta
-                    elif dias_vencimento == 0:
-                        if self._enviar_mensagem_cliente(cliente, 'vencimento_hoje'):
-                            enviadas += 1
-                            logger.info(f"🚨 Alerta enviado: {cliente['nome']} (vence hoje)")
-                    
-                    # 3. Cliente vence amanhã - Enviar lembrete (1 dia antes)
-                    elif dias_vencimento == 1:
-                        if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias'):
-                            enviadas += 1
-                            logger.info(f"⏰ Lembrete enviado: {cliente['nome']} (vence amanhã)")
-                    
-                    # 4. Cliente vence em 2 dias - Enviar lembrete (2 dias antes)
-                    elif dias_vencimento == 2:
-                        if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias'):
-                            enviadas += 1
-                            logger.info(f"⏰ Lembrete enviado: {cliente['nome']} (vence em 2 dias)")
-                    
-                    # 5. Clientes que vencem em mais de 2 dias - NÃO processar
-                    elif dias_vencimento > 2:
-                        logger.debug(f"Cliente {cliente['nome']} vence em {dias_vencimento} dias - aguardando")
-                        
-                except Exception as e:
-                    logger.error(f"Erro ao processar cliente {cliente['nome']}: {e}")
-            
-            logger.info(f"=== ENVIO CONCLUÍDO: {enviadas} mensagens enviadas às 9h ===")
-            
-        except Exception as e:
-            logger.error(f"Erro no envio diário às 9h: {e}")
     
-    def processar_todos_vencidos(self, forcar_reprocesso=False):
-        """Processa TODOS os clientes vencidos, mesmo os com mais de 1 dia (usado quando horário é alterado)"""
+    def processar_todos_vencidos(self, chat_id_usuario=None, forcar_reprocesso=False):
+        """Processa clientes vencidos do usuário especificado ou de todos os usuários se None
+        
+        Quando chat_id_usuario é especificado (alteração de horário):
+        - Processa apenas clientes desse usuário
+        - Envia cobrança apenas para clientes vencidos há exatamente 1 dia
+        - Envia lembretes/alertas para clientes que vencem em 2, 1 dia ou hoje
+        
+        Quando chat_id_usuario é None (processamento geral):
+        - Processa todos os usuários
+        - Segue as mesmas regras de filtragem
+        """
         try:
-            logger.info("=== PROCESSAMENTO FORÇADO DE TODOS OS VENCIDOS ===")
-            logger.info("Enviando mensagens para todos os clientes vencidos...")
+            if chat_id_usuario:
+                logger.info(f"=== PROCESSAMENTO FORÇADO PARA USUÁRIO {chat_id_usuario} ===")
+                logger.info("Enviando mensagens para clientes vencidos do usuário...")
+            else:
+                logger.info("=== PROCESSAMENTO FORÇADO DE TODOS OS VENCIDOS ===")
+                logger.info("Enviando mensagens para todos os clientes vencidos...")
             
-            # Buscar clientes ativos - TODOS OS USUÁRIOS para processamento geral
-            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=None)
+            # Buscar clientes ativos - apenas do usuário especificado ou todos
+            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id_usuario)
             
             if not clientes:
                 logger.info("Nenhum cliente ativo encontrado")
@@ -451,42 +417,53 @@ class MessageScheduler:
                     vencimento = cliente['vencimento']
                     dias_vencimento = (vencimento - hoje).days
                     
-                    # Processar TODOS os clientes vencidos (independente de quantos dias)
-                    if dias_vencimento < 0:  # Qualquer cliente vencido
-                        dias_vencido = abs(dias_vencimento)
-                        
+                    # 1. Cliente vencido há exatamente 1 dia - ÚNICA COBRANÇA AUTOMÁTICA
+                    if dias_vencimento == -1:
                         # Verificar se já foi enviada hoje (evitar duplicatas)
                         template = self.db.obter_template_por_tipo('vencimento_1dia_apos', cliente.get('chat_id_usuario'))
                         if template and not forcar_reprocesso:
                             if self._ja_enviada_hoje(cliente['id'], template['id']):
-                                logger.info(f"⏭️  {cliente['nome']} - mensagem já enviada hoje")
+                                logger.info(f"⏭️  {cliente['nome']} - cobrança já enviada hoje")
                                 continue
                         
-                        # CRÍTICO: Passar chat_id_usuario para isolamento
                         if self._enviar_mensagem_cliente(cliente, 'vencimento_1dia_apos', cliente.get('chat_id_usuario')):
                             enviadas += 1
-                            logger.info(f"📧 Cobrança enviada: {cliente['nome']} (vencido há {dias_vencido} dias)")
+                            logger.info(f"📧 Cobrança enviada: {cliente['nome']} (vencido há 1 dia)")
+                    
+                    # 2. Clientes vencidos há mais de 1 dia - IGNORAR (não enviar cobrança automática)
+                    elif dias_vencimento < -1:
+                        dias_vencido = abs(dias_vencimento)
+                        logger.info(f"⏭️  {cliente['nome']} vencido há {dias_vencido} dias - ignorado (processo manual)")
                         
-                    # Processar também os que vencem hoje/amanhã/depois de amanhã
+                    # 3. Cliente vence hoje - Enviar alerta urgente
                     elif dias_vencimento == 0:
                         if self._enviar_mensagem_cliente(cliente, 'vencimento_hoje', cliente.get('chat_id_usuario')):
                             enviadas += 1
                             logger.info(f"🚨 Alerta enviado: {cliente['nome']} (vence hoje)")
                             
+                    # 4. Cliente vence em 1 dia - Enviar lembrete
                     elif dias_vencimento == 1:
                         if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias', cliente.get('chat_id_usuario')):
                             enviadas += 1
                             logger.info(f"⏰ Lembrete enviado: {cliente['nome']} (vence amanhã)")
                             
+                    # 5. Cliente vence em 2 dias - Enviar lembrete
                     elif dias_vencimento == 2:
                         if self._enviar_mensagem_cliente(cliente, 'vencimento_2dias', cliente.get('chat_id_usuario')):
                             enviadas += 1
                             logger.info(f"⏰ Lembrete enviado: {cliente['nome']} (vence em 2 dias)")
+                    
+                    # 6. Clientes que vencem em mais de 2 dias - Não processar
+                    elif dias_vencimento > 2:
+                        logger.debug(f"Cliente {cliente['nome']} vence em {dias_vencimento} dias - aguardando")
                         
                 except Exception as e:
                     logger.error(f"Erro ao processar cliente {cliente['nome']}: {e}")
             
-            logger.info(f"=== PROCESSAMENTO FORÇADO CONCLUÍDO: {enviadas} mensagens enviadas ===")
+            if chat_id_usuario:
+                logger.info(f"=== PROCESSAMENTO USUÁRIO {chat_id_usuario} CONCLUÍDO: {enviadas} mensagens enviadas ===")
+            else:
+                logger.info(f"=== PROCESSAMENTO FORÇADO CONCLUÍDO: {enviadas} mensagens enviadas ===")
             return enviadas
             
         except Exception as e:
@@ -494,7 +471,7 @@ class MessageScheduler:
             return 0
     
     
-def _enviar_mensagem_cliente(self, cliente, tipo_template, chat_id_usuario=None):
+    def _enviar_mensagem_cliente(self, cliente, tipo_template, chat_id_usuario=None):
         """Envia mensagem imediatamente para o cliente"""
         try:
             # Resolver chat_id do usuário (prioriza o parâmetro)
@@ -542,7 +519,7 @@ def _enviar_mensagem_cliente(self, cliente, tipo_template, chat_id_usuario=None)
         except Exception as e:
             logger.error(f"Erro ao enviar mensagem para cliente: {e}")
             return False
-def _cliente_pode_receber_mensagem(self, cliente, tipo_template):
+    def _cliente_pode_receber_mensagem(self, cliente, tipo_template):
         """Verifica se o cliente pode receber mensagens baseado nas preferências de notificação"""
         try:
             cliente_id = cliente['id']

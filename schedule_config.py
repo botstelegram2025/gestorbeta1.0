@@ -290,6 +290,21 @@ Escolha uma opção ou informe um *personalizado*:"""
             valor = f"{hh:02d}:{mm:02d}"
             self._salvar_config(chat_id, CHAVE_ENVIO_CANONICA, valor)
             self.bot.send_message(chat_id, f"✅ Horário de *envio* alterado para `{valor}`", parse_mode='Markdown')
+            
+            # Processar imediatamente todos os clientes vencidos deste usuário
+            enviadas = 0
+            if hasattr(self.bot, 'scheduler') and hasattr(self.bot.scheduler, 'processar_todos_vencidos'):
+                try:
+                    enviadas = self.bot.scheduler.processar_todos_vencidos(chat_id_usuario=chat_id, forcar_reprocesso=False)
+                except Exception as e:
+                    logger.error(f"Erro ao processar vencidos após alterar horário de envio: {e}")
+            
+            # Mostrar feedback de quantas mensagens foram enviadas
+            if enviadas > 0:
+                self.bot.send_message(chat_id, f"📧 {enviadas} mensagens enviadas para clientes vencidos", parse_mode='Markdown')
+            else:
+                self.bot.send_message(chat_id, "✅ Nenhum cliente vencido para processar no momento", parse_mode='Markdown')
+            
             self.config_horarios_menu(chat_id)
             self._reprogramar_jobs_seguro()
         except Exception as e:
@@ -302,6 +317,21 @@ Escolha uma opção ou informe um *personalizado*:"""
             valor = f"{hh:02d}:{mm:02d}"
             self._salvar_config(chat_id, CHAVE_VERIF_CANONICA, valor)
             self.bot.send_message(chat_id, f"✅ Horário de *verificação* alterado para `{valor}`", parse_mode='Markdown')
+            
+            # Processar imediatamente todos os clientes vencidos deste usuário
+            enviadas = 0
+            if hasattr(self.bot, 'scheduler') and hasattr(self.bot.scheduler, 'processar_todos_vencidos'):
+                try:
+                    enviadas = self.bot.scheduler.processar_todos_vencidos(chat_id_usuario=chat_id, forcar_reprocesso=False)
+                except Exception as e:
+                    logger.error(f"Erro ao processar vencidos após alterar horário de verificação: {e}")
+            
+            # Mostrar feedback de quantas mensagens foram enviadas
+            if enviadas > 0:
+                self.bot.send_message(chat_id, f"📧 {enviadas} mensagens enviadas para clientes vencidos", parse_mode='Markdown')
+            else:
+                self.bot.send_message(chat_id, "✅ Nenhum cliente vencido para processar no momento", parse_mode='Markdown')
+            
             self.config_horarios_menu(chat_id)
             self._reprogramar_jobs_seguro()
         except Exception as e:
@@ -358,11 +388,14 @@ Escolha uma opção ou informe um *personalizado*:"""
                 return False
             estado = estado or self.bot.conversation_states.get(chat_id)
             hhmm_digits = texto.replace(':', '')
+            
+            # Processar de acordo com o estado
             if estado == 'aguardando_horario_envio':
                 self.set_horario_envio(chat_id, hhmm_digits)
             elif estado == 'aguardando_horario_verificacao':
                 self.set_horario_verificacao(chat_id, hhmm_digits)
             elif estado == 'aguardando_horario_limpeza':
+                # Para limpeza, não precisa processar vencidos
                 self.set_horario_limpeza(chat_id, hhmm_digits)
             else:
                 self.bot.send_message(chat_id, "❌ Estado inválido. Volte ao menu de horários.")
@@ -434,9 +467,24 @@ Escolha uma opção ou informe um *personalizado*:"""
             if getattr(self.bot, 'db', None):
                 self.bot.db.salvar_configuracao(CHAVE_TZ, 'America/Sao_Paulo', chat_id_usuario=chat_id)
 
+            # Processar imediatamente todos os clientes vencidos deste usuário após reset
+            enviadas = 0
+            if hasattr(self.bot, 'scheduler') and hasattr(self.bot.scheduler, 'processar_todos_vencidos'):
+                try:
+                    enviadas = self.bot.scheduler.processar_todos_vencidos(chat_id_usuario=chat_id, forcar_reprocesso=False)
+                except Exception as e:
+                    logger.error(f"Erro ao processar vencidos após resetar horários: {e}")
+
             self._reprogramar_jobs_seguro()
 
-            self.bot.send_message(chat_id, "✅ Horários resetados para padrão: 09:00 / 09:00 / 02:00")
+            # Mensagem combinada com feedback
+            mensagem = "✅ Horários resetados para padrão: 09:00 / 09:00 / 02:00"
+            if enviadas > 0:
+                mensagem += f"\n📧 {enviadas} mensagens enviadas para clientes vencidos"
+            else:
+                mensagem += "\n✅ Nenhum cliente vencido para processar no momento"
+            
+            self.bot.send_message(chat_id, mensagem)
         except Exception as e:
             logger.error(f"Erro ao resetar horários padrão: {e}")
             self.bot.send_message(chat_id, f"❌ Erro ao resetar horários: {str(e)}")
