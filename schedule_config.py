@@ -126,10 +126,13 @@ class ScheduleConfig:
         """
         Reinstala/garante os jobs principais S/ trocar a instância da APScheduler.
         - Remove duplicatas por ID
-        - Chama self.bot.scheduler._setup_main_jobs()
+        - Chama self.bot.scheduler.recarregar_jobs() (novo método público)
+        - Processa imediatamente a fila de mensagens pendentes
         - Garante .start() se não estiver rodando
         """
         try:
+            logger.info("=== REPROGRAMAÇÃO SEGURA DE JOBS INICIADA ===")
+            
             sched_wrapper = getattr(self.bot, 'scheduler', None)
             if not sched_wrapper:
                 logger.warning('Scheduler wrapper ausente.')
@@ -145,23 +148,46 @@ class ScheduleConfig:
                 if job.id in vistos:
                     try:
                         sched.remove_job(job.id)
+                        logger.info(f'Duplicata de job removida: {job.id}')
                     except Exception as e:
                         logger.warning(f'Não removeu duplicata {job.id}: {e}')
                 else:
                     vistos.add(job.id)
 
-            # Recriar/garantir jobs oficiais
-            if hasattr(sched_wrapper, '_setup_main_jobs'):
-                sched_wrapper._setup_main_jobs()
+            # Usar o novo método público recarregar_jobs se disponível
+            if hasattr(sched_wrapper, 'recarregar_jobs'):
+                sucesso = sched_wrapper.recarregar_jobs()
+                if not sucesso:
+                    logger.warning('Falha no recarregamento via método público, tentando método legacy')
+                    if hasattr(sched_wrapper, '_setup_main_jobs'):
+                        sched_wrapper._setup_main_jobs()
+            else:
+                # Fallback para compatibilidade
+                if hasattr(sched_wrapper, '_setup_main_jobs'):
+                    sched_wrapper._setup_main_jobs()
 
             # Garantir que está rodando
             try:
                 if not getattr(sched_wrapper, 'running', False):
                     sched_wrapper.start()
+                    logger.info('Scheduler iniciado após reprogramação')
             except Exception as e:
                 logger.warning(f'Falha ao iniciar scheduler: {e}')
 
+            # NOVO: Processar imediatamente a fila de mensagens pendentes
+            logger.info("Iniciando processamento imediato da fila após alteração de horário...")
+            try:
+                if hasattr(sched_wrapper, '_processar_fila_mensagens'):
+                    sched_wrapper._processar_fila_mensagens()
+                    logger.info("✅ Fila de mensagens processada imediatamente após alteração de horário")
+                else:
+                    logger.warning("Método _processar_fila_mensagens não encontrado no scheduler")
+            except Exception as e:
+                logger.error(f"Erro ao processar fila imediatamente: {e}")
+
+            logger.info("=== REPROGRAMAÇÃO SEGURA DE JOBS FINALIZADA ===")
             return True
+            
         except Exception as e:
             logger.error(f'Erro ao reprogramar jobs: {e}')
             return False

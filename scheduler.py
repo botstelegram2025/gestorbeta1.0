@@ -158,6 +158,41 @@ class MessageScheduler:
         """Verifica se o agendador está rodando"""
         return self.running and self.scheduler.running
     
+    def recarregar_jobs(self):
+        """
+        Método público para recarregar jobs imediatamente com a nova configuração.
+        Reprograma os jobs, garante que o agendador está rodando e registra logs de diagnóstico.
+        """
+        try:
+            logger.info("=== RECARREGAMENTO DE JOBS INICIADO ===")
+            
+            # Reprogar os jobs principais
+            self._setup_main_jobs()
+            logger.info("Jobs principais reconfigurados com novos horários")
+            
+            # Garantir que o agendador está rodando
+            if not self.running:
+                self.start()
+                logger.info("Agendador iniciado após recarregamento de jobs")
+            elif not self.scheduler.running:
+                try:
+                    self.scheduler.start()
+                    self.running = True
+                    logger.info("Instância APScheduler reiniciada após recarregamento")
+                except Exception as e:
+                    logger.warning(f"Falha ao reiniciar APScheduler: {e}")
+            
+            # Verificar jobs ativos após recarregamento
+            jobs_count = len(self.scheduler.get_jobs())
+            logger.info(f"Recarregamento concluído: {jobs_count} jobs ativos")
+            logger.info("=== RECARREGAMENTO DE JOBS FINALIZADO ===")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro durante recarregamento de jobs: {e}")
+            return False
+    
     def ultima_verificacao(self):
         """Retorna a última verificação formatada"""
         if self.ultima_verificacao_time:
@@ -493,8 +528,7 @@ class MessageScheduler:
             logger.error(f"Erro no processamento forçado de vencidos: {e}")
             return 0
     
-    
-def _enviar_mensagem_cliente(self, cliente, tipo_template, chat_id_usuario=None):
+    def _enviar_mensagem_cliente(self, cliente, tipo_template, chat_id_usuario=None):
         """Envia mensagem imediatamente para o cliente"""
         try:
             # Resolver chat_id do usuário (prioriza o parâmetro)
@@ -542,7 +576,8 @@ def _enviar_mensagem_cliente(self, cliente, tipo_template, chat_id_usuario=None)
         except Exception as e:
             logger.error(f"Erro ao enviar mensagem para cliente: {e}")
             return False
-def _cliente_pode_receber_mensagem(self, cliente, tipo_template):
+    
+    def _cliente_pode_receber_mensagem(self, cliente, tipo_template):
         """Verifica se o cliente pode receber mensagens baseado nas preferências de notificação"""
         try:
             cliente_id = cliente['id']
