@@ -66,7 +66,7 @@ class MessageScheduler:
                 hora_limp, min_limp = 2, 0
             
             # Limpar jobs existentes antes de criar novos
-            job_ids = ['envio_diario_9h', 'limpar_fila', 'alerta_admin', 'alertas_usuarios']
+            job_ids = ['envio_diario_9h', 'limpar_fila', 'alerta_admin', 'alertas_usuarios', 'verificacao_5h', 'processar_fila_minuto']
             for job_id in job_ids:
                 try:
                     if self.scheduler.get_job(job_id):
@@ -100,7 +100,28 @@ class MessageScheduler:
                 name=f'Alertas Diários por Usuário às {horario_verificacao}',
                 replace_existing=True
             )
+
             
+            # Verificação diária às 05:00 para montar a fila do dia
+            self.scheduler.add_job(
+                func=self._verificar_e_agendar_mensagens_do_dia,
+                trigger=CronTrigger(hour=5, minute=0, timezone=self.scheduler.timezone),
+                id='verificacao_5h',
+                name='Verificação diária às 05:00',
+                replace_existing=True
+            )
+            
+            # Worker da fila: roda todo minuto (segundo 0)
+            self.scheduler.add_job(
+                func=self._processar_fila_mensagens,
+                trigger=CronTrigger(second=0, timezone=self.scheduler.timezone),
+                id='processar_fila_minuto',
+                name='Processar fila (minutal)',
+                replace_existing=True,
+                misfire_grace_time=60,
+                coalesce=True
+            )
+                    
             logger.info(f"Jobs principais configurados - Envio: {horario_envio}, Verificação: {horario_verificacao}, Limpeza: {horario_limpeza}")
             
             # Verificar se jobs foram criados
@@ -118,7 +139,8 @@ class MessageScheduler:
                 self.scheduler.start()
                 self.running = True
                 logger.info("Agendador de mensagens iniciado com sucesso!")
-                logger.info("Mensagens serão enviadas às 9h da manhã diariamente")
+                horario_envio = self._get_horario_config_global('horario_envio', '09:00')
+                logger.info(f"Mensagens serão enviadas diariamente às {horario_envio}")
         except Exception as e:
             logger.error(f"Erro ao iniciar agendador: {e}")
     
@@ -159,6 +181,11 @@ class MessageScheduler:
             
             for mensagem in mensagens_pendentes:
                 try:
+                    ag = mensagem.get('agendado_para')
+                    agora = agora_br()
+                    if ag and ag > agora:
+                        # ainda não é hora
+                        continue
                     self._enviar_mensagem_fila(mensagem)
                     # Aguardar entre envios para não sobrecarregar
                     import time
@@ -466,43 +493,39 @@ class MessageScheduler:
             logger.error(f"Erro no processamento forçado de vencidos: {e}")
             return 0
     
-    def _enviar_mensagem_cliente(self, cliente, tipo_template, chat_id_usuario=None):
+    
+def _enviar_mensagem_cliente(self, cliente, tipo_template, chat_id_usuario=None):
         """Envia mensagem imediatamente para o cliente"""
         try:
-            # Obter chat_id_usuario do cliente se não foi passado
-            if not chat_id_usuario:
-                chat_id_usuario = cliente.get('chat_id_usuario')
-            
-            # Verificar preferências de notificação PRIMEIRO
+            # Resolver chat_id do usuário (prioriza o parâmetro)
+            resolved_chat_id = chat_id_usuario or cliente.get('chat_id_usuario')
+            if not resolved_chat_id:
+                logger.error(f"Cliente {cliente.get('nome')} sem chat_id_usuario - não pode enviar WhatsApp")
+                return False
+
+            # Verificar preferências antes de tudo
             if not self._cliente_pode_receber_mensagem(cliente, tipo_template):
                 logger.info(f"Cliente {cliente['nome']} optou por não receber mensagens do tipo {tipo_template}")
                 return False
-            
-            # Buscar template correspondente com isolamento por usuário
-            template = self.db.obter_template_por_tipo(tipo_template, chat_id_usuario)
+
+            # Buscar template com isolamento por usuário
+            template = self.db.obter_template_por_tipo(tipo_template, resolved_chat_id)
             if not template:
-                logger.warning(f"Template {tipo_template} não encontrado para usuário {chat_id_usuario}")
+                logger.warning(f"Template {tipo_template} não encontrado para usuário {resolved_chat_id}")
                 return False
-            
-            # Processar template com dados do cliente
+
             mensagem = self.template_manager.processar_template(template['conteudo'], cliente)
-            
-            # Verificar se já foi enviada hoje (evitar duplicatas)
+
+            # Evitar duplicidade diária
             if self._ja_enviada_hoje(cliente['id'], template['id']):
                 logger.info(f"Mensagem {tipo_template} já enviada hoje para {cliente['nome']}")
                 return False
-            
-            # Enviar via WhatsApp - incluir chat_id_usuario obrigatório
-            chat_id_usuario = cliente.get('chat_id_usuario')
-            if not chat_id_usuario:
-                logger.error(f"Cliente {cliente['nome']} sem chat_id_usuario - não pode enviar WhatsApp")
-                return False
-                
-            resultado = self.baileys_api.send_message(cliente['telefone'], mensagem, chat_id_usuario)
+
+            # Enviar via WhatsApp
+            resultado = self.baileys_api.send_message(cliente['telefone'], mensagem, resolved_chat_id)
             sucesso = resultado.get('success', False) if resultado else False
-            
+
             if sucesso:
-                # Registrar envio no log
                 self.db.registrar_envio(
                     cliente_id=cliente['id'],
                     template_id=template['id'],
@@ -510,18 +533,16 @@ class MessageScheduler:
                     mensagem=mensagem,
                     tipo_envio='automatico',
                     sucesso=True,
-                    chat_id_usuario=chat_id_usuario
+                    chat_id_usuario=resolved_chat_id
                 )
                 return True
             else:
                 logger.error(f"Falha ao enviar mensagem para {cliente['nome']}")
                 return False
-                
         except Exception as e:
             logger.error(f"Erro ao enviar mensagem para cliente: {e}")
             return False
-    
-    def _cliente_pode_receber_mensagem(self, cliente, tipo_template):
+def _cliente_pode_receber_mensagem(self, cliente, tipo_template):
         """Verifica se o cliente pode receber mensagens baseado nas preferências de notificação"""
         try:
             cliente_id = cliente['id']
@@ -819,7 +840,7 @@ Renove agora e mantenha tudo funcionando! 👇"""
         """Agenda mensagem específica de vencimento para envio no mesmo dia"""
         try:
             # Buscar template correspondente
-            template = self.db.obter_template_por_tipo(tipo_template)
+            template = self.db.obter_template_por_tipo(tipo_template, chat_id_usuario=cliente.get('chat_id_usuario'))
             if not template:
                 logger.warning(f"Template {tipo_template} não encontrado")
                 return
