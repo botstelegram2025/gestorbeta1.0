@@ -16,8 +16,16 @@ app.use(express.json());
 const sessions = new Map(); // sessionId -> { sock, qrCode, isConnected, status, backupInterval }
 
 // Sistema ROBUSTO de backup da sessão - com retry e fallback
+// IMPORTANTE: Só faz backup se a sessão estiver "connected" (proteção contra estados inválidos)
 const saveSessionToDatabase = async (sessionId, retries = 3) => {
     try {
+        // PROTEÇÃO: Verificar se a sessão está em estado válido para backup
+        const session = sessions.get(sessionId);
+        if (!session || session.status !== 'connected') {
+            console.log(`🚫 Backup NEGADO para sessão ${sessionId} - Status: ${session?.status || 'não encontrada'}`);
+            return false;
+        }
+        
         const authPath = `./auth_info_${sessionId}`;
         if (!fs.existsSync(authPath)) return;
 
@@ -77,7 +85,83 @@ const saveSessionToDatabase = async (sessionId, retries = 3) => {
     }
 };
 
+// Função para DELETAR sessão do banco de dados (logout real)
+const deleteSessionFromDatabase = async (sessionId, retries = 3) => {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+            
+            const response = await fetch(`http://localhost:5000/api/session/delete`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: sessionId }),
+                signal: controller.signal
+            });
+            
+            clearTimeout(timeoutId);
+            
+            if (response.ok) {
+                console.log(`🗑️ Sessão ${sessionId} deletada do banco (tentativa ${attempt})`);
+                return true;
+            } else if (response.status === 404) {
+                console.log(`ℹ️ Sessão ${sessionId} não encontrada no banco para deletar`);
+                return true; // Consideramos sucesso se já não existe
+            } else {
+                throw new Error(`HTTP ${response.status}`);
+            }
+        } catch (error) {
+            console.log(`⚠️ Tentativa ${attempt}/${retries} de deletar sessão ${sessionId}: ${error.message}`);
+            
+            if (attempt === retries) {
+                console.log(`❌ FALHA ao deletar sessão ${sessionId} após ${retries} tentativas`);
+                return false;
+            }
+            
+            // Aguardar antes da próxima tentativa
+            await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+        }
+    }
+    return false;
+};
+
+// Função para verificar se arquivos essenciais existem após restore
+const verifyEssentialFiles = (sessionId) => {
+    const authPath = `./auth_info_${sessionId}`;
+    
+    if (!fs.existsSync(authPath)) {
+        return false;
+    }
+    
+    // Verificar arquivos essenciais do Baileys
+    const essentialFiles = ['creds.json', 'app-state-sync-version.json'];
+    
+    for (const file of essentialFiles) {
+        const filePath = path.join(authPath, file);
+        if (!fs.existsSync(filePath)) {
+            console.log(`⚠️ Arquivo essencial ${file} não encontrado para sessão ${sessionId}`);
+            return false;
+        }
+        
+        // Verificar se arquivo não está vazio
+        try {
+            const content = fs.readFileSync(filePath, 'utf8');
+            if (!content.trim()) {
+                console.log(`⚠️ Arquivo essencial ${file} está vazio para sessão ${sessionId}`);
+                return false;
+            }
+        } catch (error) {
+            console.log(`⚠️ Erro ao ler arquivo essencial ${file} para sessão ${sessionId}:`, error.message);
+            return false;
+        }
+    }
+    
+    console.log(`✅ Arquivos essenciais verificados para sessão ${sessionId}`);
+    return true;
+};
+
 // Restaurar sessão ROBUSTA do banco de dados com retry
+// IMPORTANTE: Verifica se arquivos essenciais existem após restaurar
 const restoreSessionFromDatabase = async (sessionId, retries = 3) => {
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
@@ -105,7 +189,16 @@ const restoreSessionFromDatabase = async (sessionId, retries = 3) => {
                     }
                     
                     console.log(`🔄 Sessão ${sessionId} restaurada do banco (tentativa ${attempt})`);
-                    return true;
+                    
+                    // PROTEÇÃO: Verificar se arquivos essenciais foram restaurados corretamente
+                    if (verifyEssentialFiles(sessionId)) {
+                        console.log(`✅ Sessão ${sessionId} restaurada e verificada com sucesso`);
+                        return true;
+                    } else {
+                        console.log(`⚠️ Sessão ${sessionId} restaurada mas arquivos essenciais estão ausentes/corrompidos`);
+                        console.log(`🔔 Será necessário fazer login novamente para sessão ${sessionId}`);
+                        return false;
+                    }
                 }
             } else if (response.status === 404) {
                 console.log(`ℹ️ Nenhuma sessão ${sessionId} encontrada no banco`);
@@ -184,22 +277,27 @@ const connectToWhatsApp = async (sessionId) => {
         const session = sessions.get(sessionId);
         session.sock = sock;
 
-        // Salvar credenciais quando necessário - COM THROTTLING
+        // Salvar credenciais quando necessário - COM THROTTLING E VERIFICAÇÃO DE STATUS
         let lastBackup = 0;
         sock.ev.on('creds.update', async () => {
             await saveCreds();
             
-            // Throttling: só fazer backup a cada 30 segundos
-            const now = Date.now();
-            if (now - lastBackup > 30000) { // 30 segundos
-                lastBackup = now;
-                saveSessionToDatabase(sessionId).catch(err => {
-                    console.log(`⚠️ Backup creds ${sessionId} falhou:`, err.message);
-                });
+            // PROTEÇÃO: Só fazer backup se a sessão estiver conectada
+            if (session.status === 'connected') {
+                // Throttling: só fazer backup a cada 30 segundos
+                const now = Date.now();
+                if (now - lastBackup > 30000) { // 30 segundos
+                    lastBackup = now;
+                    saveSessionToDatabase(sessionId).catch(err => {
+                        console.log(`⚠️ Backup creds ${sessionId} falhou:`, err.message);
+                    });
+                }
+            } else {
+                console.log(`🚫 Backup creds NEGADO para sessão ${sessionId} - Status: ${session.status}`);
             }
         });
 
-        // Gerenciar conexão específica por sessão
+        // Gerenciar conexão específica por sessão - COM PROTEÇÃO CONTRA ESTADOS INVÁLIDOS
         sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
             
@@ -213,14 +311,50 @@ const connectToWhatsApp = async (sessionId) => {
                 session.isConnected = false;
                 session.status = 'disconnected';
                 
-                const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-                console.log(`🔌 Sessão ${sessionId} - Conexão fechada. Reconectar?`, shouldReconnect);
+                const disconnectReason = (lastDisconnect?.error)?.output?.statusCode;
+                const shouldReconnect = disconnectReason !== DisconnectReason.loggedOut;
+                console.log(`🔌 Sessão ${sessionId} - Conexão fechada. Motivo:`, disconnectReason, '- Reconectar?', shouldReconnect);
                 
-                // Tratamento de reconexão específico por sessão
-                if ((lastDisconnect?.error)?.output?.statusCode === DisconnectReason.badSession ||
-                    (lastDisconnect?.error)?.output?.statusCode === DisconnectReason.restartRequired ||
-                    lastDisconnect?.error?.message?.includes('device_removed') ||
-                    lastDisconnect?.error?.message?.includes('conflict')) {
+                // PROTEÇÃO: Detectar desconexões que invalidam a sessão (badSession ou loggedOut)
+                if (disconnectReason === DisconnectReason.badSession || 
+                    disconnectReason === DisconnectReason.loggedOut) {
+                    
+                    console.log(`🚨 LOGOUT REAL detectado para sessão ${sessionId} - Motivo: ${disconnectReason === DisconnectReason.badSession ? 'badSession' : 'loggedOut'}`);
+                    
+                    // Limpar pasta local
+                    const authPath = `./auth_info_${sessionId}`;
+                    if (fs.existsSync(authPath)) {
+                        try {
+                            fs.rmSync(authPath, { recursive: true });
+                            console.log(`🧹 Pasta local ${authPath} limpa`);
+                        } catch (error) {
+                            console.log(`⚠️ Erro ao limpar pasta ${authPath}:`, error.message);
+                        }
+                    }
+                    
+                    // Deletar sessão do banco de dados
+                    deleteSessionFromDatabase(sessionId).then(success => {
+                        if (success) {
+                            console.log(`🗑️ Sessão ${sessionId} removida do banco de dados`);
+                        } else {
+                            console.log(`⚠️ Falha ao remover sessão ${sessionId} do banco de dados`);
+                        }
+                    });
+                    
+                    // Limpar interval de backup
+                    if (session.backupInterval) {
+                        clearInterval(session.backupInterval);
+                        session.backupInterval = null;
+                    }
+                    
+                    // Não reconectar automaticamente - usuário deve fazer login novamente
+                    session.qrCode = '';
+                    session.status = 'logged_out';
+                    console.log(`🔔 Sessão ${sessionId} requer novo login - não será reconectada automaticamente`);
+                    
+                } else if (disconnectReason === DisconnectReason.restartRequired ||
+                           lastDisconnect?.error?.message?.includes('device_removed') ||
+                           lastDisconnect?.error?.message?.includes('conflict')) {
                     console.log(`🧹 Sessão ${sessionId} - Aguardando devido a conflito...`);
                     session.qrCode = '';
                     session.status = 'disconnected';
