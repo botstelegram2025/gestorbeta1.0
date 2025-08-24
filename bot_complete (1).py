@@ -16,7 +16,7 @@ import pytz
 from database import DatabaseManager
 from templates import TemplateManager
 from baileys_api import BaileysAPI
-from scheduler import MessageScheduler
+from scheduler_v2_simple import SimpleScheduler
 # from baileys_clear import BaileysCleaner  # Removido - não utilizado
 from schedule_config import ScheduleConfig
 from whatsapp_session_api import session_api, init_session_manager
@@ -187,7 +187,7 @@ class TelegramBot:
         try:
             # Inicializar agendador (apenas se dependências disponíveis)
             if self.db and self.baileys_api and self.template_manager:
-                self.scheduler = MessageScheduler(self.db, self.baileys_api, self.template_manager)
+                self.scheduler = SimpleScheduler(self.db, self.baileys_api)
                 # Definir instância do bot no scheduler para alertas automáticos
                 self.scheduler.set_bot_instance(self)
                 self.scheduler_instance = self.scheduler
@@ -416,7 +416,7 @@ class TelegramBot:
                 # Verificar se está aguardando horário personalizado
                 if isinstance(user_state, str) and user_state.startswith('aguardando_horario_'):
                     if hasattr(self, 'schedule_config') and self.schedule_config:
-                        if self.schedule_config.processar_horario_personalizado(chat_id, text):
+                        if self.schedule_config.processar_horario_personalizado(chat_id, text, user_state):
                             return  # Horário processado com sucesso
                 
                 logger.info(f"Processando estado de conversação para {chat_id}")

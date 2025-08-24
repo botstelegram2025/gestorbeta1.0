@@ -12,7 +12,7 @@ import pytz
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, CallbackQueryHandler
 from telegram import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from database import DatabaseManager
-from scheduler import MessageScheduler
+from scheduler_v2_simple import SimpleScheduler
 from templates import TemplateManager
 from baileys_api import BaileysAPI
 from utils import *
@@ -1242,7 +1242,7 @@ async def main():
         baileys_api = BaileysAPI()
         
         logger.info("Inicializando agendador...")
-        scheduler = MessageScheduler(db, baileys_api, template_manager)
+        scheduler = SimpleScheduler(db, baileys_api)
         
         # Criar aplicação do bot
         application = Application.builder().token(bot_token).build()
