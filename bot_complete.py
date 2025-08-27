@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Bot Telegram Completo - Sistema de Gestão de Clientes
-Versão funcional com todas as funcionalidades do main.py usando API HTTP
+Versão funcional com todas as funcionalidades do main.py usando API
 """
 import os
 import logging
