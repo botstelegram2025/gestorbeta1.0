@@ -101,7 +101,7 @@ class Config:
         
         # Configurações do Baileys
         self.baileys = BaileysConfig(
-            api_url=os.getenv('BAILEYS_API_URL', 'http://localhost:3000'),
+            api_url=os.getenv('BAILEYS_API_URL', 'http://baileys-local-persist.railway.internal:3000'),
             api_key=os.getenv('BAILEYS_API_KEY', ''),
             session_name=os.getenv('BAILEYS_SESSION', 'bot_clientes'),
             timeout=int(os.getenv('BAILEYS_TIMEOUT', '30')),
