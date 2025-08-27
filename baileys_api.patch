@@ -1,0 +1,350 @@
+--- a/baileys_api.py
++++ b/baileys_api.py
+@@ -9,10 +9,11 @@
+ import json
+ import time
+ from typing import Dict, Any, Optional, List
+ import base64
+ from io import BytesIO
+ import qrcode
++from urllib.parse import urlparse
+ from utils import agora_br, formatar_datetime_br
+ 
+ logger = logging.getLogger(__name__)
+ 
+ class BaileysAPI:
+@@ -20,7 +21,12 @@
+-        self.base_url = os.getenv('BAILEYS_API_URL', 'http://localhost:3000')
++        # Normaliza BAILEYS_API_URL (adiciona esquema se faltar e remove / final)
++        raw_url = os.getenv('BAILEYS_API_URL', 'http://localhost:3000').strip()
++        if not urlparse(raw_url).scheme:
++            raw_url = 'http://' + raw_url
++        self.base_url = raw_url.rstrip('/')
++
+         self.api_key = os.getenv('BAILEYS_API_KEY', '')
+         # Remover sessão padrão fixa - será definida por usuário
+         self.default_session = os.getenv('BAILEYS_SESSION', 'bot_clientes')  # Apenas fallback
+         self.timeout = int(os.getenv('BAILEYS_TIMEOUT', '30'))
+         self.max_retries = int(os.getenv('BAILEYS_MAX_RETRIES', '3'))
+@@ -128,53 +134,63 @@
+-    def get_status(self, chat_id_usuario: int = None) -> Dict:
+-        """Obtém status da conexão WhatsApp para usuário específico"""
+-        try:
+-            # Determinar sessão do usuário
+-            session_name = self.get_user_session(chat_id_usuario) if chat_id_usuario else self.default_session
+-            
+-            # Verificar cache
+-            now = time.time()
+-            cache_key = f'status_{session_name}'
+-            if (cache_key in self._status_cache and 
+-                now - self._status_cache.get(f'{cache_key}_timestamp', 0) < self._cache_timeout):
+-                return self._status_cache[cache_key]
+-            
+-            # Buscar status atual
+-            response = self._make_request(f'status/{session_name}')
+-            
+-            if response.get('success'):
+-                status_data = response.get('data', {})
+-                
+-                # Processar status
+-                status = {
+-                    'status': self._format_connection_status(status_data.get('state', 'disconnected')),
+-                    'numero': status_data.get('user', {}).get('id', '').replace('@s.whatsapp.net', ''),
+-                    'bateria': status_data.get('battery', {}).get('percentage'),
+-                    'ultima_conexao': self._format_last_seen(status_data.get('lastSeen')),
+-                    'qr_needed': status_data.get('qr') is not None,
+-                    'mensagens_enviadas': status_data.get('stats', {}).get('sent', 0),
+-                    'mensagens_falharam': status_data.get('stats', {}).get('failed', 0),
+-                    'fila_pendente': status_data.get('stats', {}).get('pending', 0)
+-                }
+-                
+-                # Atualizar cache
+-                self._status_cache[cache_key] = status
+-                self._status_cache[f'{cache_key}_timestamp'] = now
+-                
+-                return status
+-            else:
+-                return {
+-                    'status': '🔴 Erro na conexão',
+-                    'numero': 'N/A',
+-                    'bateria': None,
+-                    'ultima_conexao': 'N/A',
+-                    'qr_needed': True,
+-                    'mensagens_enviadas': 0,
+-                    'mensagens_falharam': 0,
+-                    'fila_pendente': 0,
+-                    'error': response.get('error', 'Erro desconhecido')
+-                }
+-                
+-        except Exception as e:
+-            logger.error(f"Erro ao obter status: {e}")
+-            return {
+-                'status': '❌ Erro interno',
+-                'numero': 'N/A',
+-                'bateria': None,
+-                'ultima_conexao': 'N/A',
+-                'qr_needed': True,
+-                'mensagens_enviadas': 0,
+-                'mensagens_falharam': 0,
+-                'fila_pendente': 0,
+-                'error': str(e)
+-            }
++    def get_status(self, chat_id_usuario: int = None) -> Dict:
++        """Obtém status da conexão WhatsApp para usuário específico (compatível com o servidor Node)."""
++        try:
++            session_name = self.get_user_session(chat_id_usuario) if chat_id_usuario else self.default_session
++
++            # cache simples
++            now = time.time()
++            cache_key = f'status_{session_name}'
++            if cache_key in self._status_cache and now - self._status_cache.get(f'{cache_key}_timestamp', 0) < self._cache_timeout:
++                return self._status_cache[cache_key]
++
++            resp = self._make_request(f'status/{session_name}', 'GET')
++
++            # Servidor Node retorna diretamente o objeto de status (sem "success")
++            if 'connected' in resp and 'status' in resp:
++                connected = bool(resp.get('connected'))
++                raw_status = str(resp.get('status') or '')
++                numero_jid = resp.get('session')
++                numero = (numero_jid or '').replace('@s.whatsapp.net', '')
++
++                status_fmt = self._format_connection_status(raw_status if not connected else 'open')
++                data = {
++                    'connected': connected,
++                    'status': status_fmt,
++                    'raw_status': raw_status,
++                    'numero': numero or 'N/A',
++                    'qr_needed': bool(resp.get('qr_available')) and not connected,
++                    'qr_available': bool(resp.get('qr_available')),
++                    'session_id': resp.get('session_id', session_name),
++                    'timestamp': resp.get('timestamp'),
++                }
++                self._status_cache[cache_key] = data
++                self._status_cache[f'{cache_key}_timestamp'] = now
++                return data
++
++            # Caso a API tenha envelopado com "success"
++            if resp.get('success') is False:
++                return {
++                    'connected': False,
++                    'status': '🔴 Erro na conexão',
++                    'numero': 'N/A',
++                    'qr_needed': True,
++                    'error': resp.get('error', 'Erro desconhecido'),
++                }
++
++            return {
++                'connected': False,
++                'status': '🔴 Indisponível',
++                'numero': 'N/A',
++                'qr_needed': True,
++                'error': 'Resposta inválida da API de status',
++            }
++
++        except Exception as e:
++            logger.error(f"Erro ao obter status: {e}")
++            return {
++                'connected': False,
++                'status': '❌ Erro interno',
++                'numero': 'N/A',
++                'qr_needed': True,
++                'error': str(e),
++            }
+@@ -218,38 +234,26 @@
+     def generate_qr_code(self, chat_id_usuario: int) -> Dict:
+         """Gera QR Code para conexão específica do usuário"""
+         try:
+             session_name = self.get_user_session(chat_id_usuario)
+-            
+-            # Usar endpoint específico por usuário - sistema multi-sessão
+-            response = requests.get(f"{self.base_url}/qr/{session_name}", timeout=30)
+-            
+-            if response.status_code == 200:
+-                data = response.json()
+-                if data.get('success'):
+-                    return {
+-                        'success': True,
+-                        'qr_code': data.get('qr'),
+-                        'qr_image': data.get('qr_image'),
+-                        'session': session_name,
+-                        'instructions': data.get('instructions', '')
+-                    }
+-                else:
+-                    return {
+-                        'success': False,
+-                        'error': data.get('error', 'QR Code não disponível')
+-                    }
+-            else:
+-                return {
+-                    'success': False,
+-                    'error': f'API retornou status {response.status_code}'
+-                }
++            # Usa _make_request (normaliza base_url e trata erros)
++            data = self._make_request(f'qr/{session_name}', 'GET')
++            if data.get('success'):
++                return {
++                    'success': True,
++                    'qr_code': data.get('qr'),
++                    'qr_image': data.get('qr_image'),
++                    'session': session_name,
++                    'instructions': data.get('instructions', '')
++                }
++            return {'success': False, 'error': data.get('error', 'QR Code não disponível')}
+                 
+         except Exception as e:
+             logger.error(f"Erro ao gerar QR Code: {e}")
+             return {'success': False, 'error': str(e)}
+ 
+     def send_message(self, phone: str, message: str, chat_id_usuario: int, options: Dict = None) -> Dict:
+         """Envia mensagem via WhatsApp do usuário específico"""
+         try:
+             # Limpar e formatar telefone
+             clean_phone = self._clean_phone_number(phone)
+             if not clean_phone:
+                 return {'success': False, 'error': 'Número de telefone inválido'}
+             
+             # Preparar dados da mensagem com sessão específica do usuário
+             session_name = self.get_user_session(chat_id_usuario)
+-            data = {
++            payload = {
+                 'number': clean_phone,
+                 'message': message,
+                 'session_id': session_name  # Incluir sessionId específico
+             }
+             
+             # Opções adicionais
+             if options:
+-                data.update(options)
+-            
+-            # Enviar mensagem via endpoint multi-sessão
+-            response = requests.post(f"{self.base_url}/send-message", 
+-                                   json=data, timeout=30)
+-            
+-            if response.status_code == 200:
+-                result = response.json()
+-                if result.get('success'):
+-                    # Aguardar delay configurado
+-                    if self.message_delay > 0:
+-                        time.sleep(self.message_delay)
+-                    
+-                    return {
+-                        'success': True,
+-                        'messageId': result.get('messageId'),
+-                        'status': 'sent',
+-                        'timestamp': result.get('timestamp', time.time())
+-                    }
+-                else:
+-                    return {
+-                        'success': False,
+-                        'error': result.get('error', 'Erro desconhecido')
+-                    }
+-            else:
+-                return {
+-                    'success': False,
+-                    'error': f'API retornou status {response.status_code}'
+-                }
++                payload.update(options)
++
++            # Usa _make_request
++            result = self._make_request('send-message', 'POST', payload)
++            if result.get('success'):
++                if self.message_delay > 0:
++                    time.sleep(self.message_delay)
++                return {
++                    'success': True,
++                    'messageId': result.get('messageId'),
++                    'status': 'sent',
++                    'timestamp': result.get('timestamp', time.time())
++                }
++            return {'success': False, 'error': result.get('error', 'Falha no envio')}
+             
+         except Exception as e:
+             logger.error(f"Erro ao enviar mensagem: {e}")
+             return {'success': False, 'error': str(e)}
+@@ -422,27 +426,47 @@
+-    def reconnect(self) -> Dict:
+-        """Reconecta a sessão WhatsApp"""
+-        try:
+-            response = self._make_request(f'restart/{self.session_name}', 'POST')
+-            
+-            # Limpar cache de status
+-            self._status_cache = {}
+-            
+-            return response
+-            
+-        except Exception as e:
+-            logger.error(f"Erro ao reconectar: {e}")
+-            return {'success': False, 'error': str(e)}
++    def reconnect(self, chat_id_usuario: int) -> Dict:
++        """Pede reconexão da sessão do usuário (sem apagar credenciais)."""
++        try:
++            session_name = self.get_user_session(chat_id_usuario)
++            resp = self._make_request(f'reconnect/{session_name}', 'POST')
++            self._status_cache = {}
++            return resp
++        except Exception as e:
++            logger.error(f"Erro ao reconectar: {e}")
++            return {'success': False, 'error': str(e)}
+ 
+-    def logout(self) -> Dict:
+-        """Faz logout da sessão WhatsApp"""
+-        try:
+-            response = self._make_request(f'logout/{self.session_name}', 'POST')
+-            
+-            # Limpar cache
+-            self._status_cache = {}
+-            
+-            return response
+-            
+-        except Exception as e:
+-            logger.error(f"Erro ao fazer logout: {e}")
+-            return {'success': False, 'error': str(e)}
++    def clear_session(self, chat_id_usuario: int) -> Dict:
++        """Apaga credenciais locais da sessão (força novo pareamento)."""
++        try:
++            session_name = self.get_user_session(chat_id_usuario)
++            resp = self._make_request(f'clear-session/{session_name}', 'POST')
++            self._status_cache = {}
++            return resp
++        except Exception as e:
++            logger.error(f"Erro ao limpar sessão: {e}")
++            return {'success': False, 'error': str(e)}
++
++    # compat: manter logout chamando clear_session
++    def logout(self, chat_id_usuario: int) -> Dict:
++        return self.clear_session(chat_id_usuario)
+@@ -450,13 +474,13 @@
+     def get_config(self) -> Dict:
+         """Obtém configurações atuais"""
+         return {
+             'base_url': self.base_url,
+-            'session': self.session_name,
++            'session': self.default_session,
+             'timeout': self.timeout,
+             'max_retries': self.max_retries,
+             'message_delay': self.message_delay,
+             'auto_reconnect': self.auto_reconnect,
+             'api_key_configured': bool(self.api_key)
+         }
+@@ -554,12 +578,17 @@
+-    def health_check(self) -> Dict:
+-        """Verifica se a API está funcionando"""
+-        try:
+-            response = self._make_request('health', 'GET')
+-            return response
+-            
+-        except Exception as e:
+-            logger.error(f"Erro no health check: {e}")
+-            return {'success': False, 'error': str(e)}
++    def health_check(self) -> Dict:
++        """Verifica se a API está respondendo (usa /sessions como health)."""
++        try:
++            resp = self._make_request('sessions', 'GET')
++            # Muitos servidores não possuem /health; usar /sessions evita 404.
++            if isinstance(resp, dict) and 'success' in resp:
++                return {'success': bool(resp.get('success')), 'data': resp}
++            return {'success': True, 'data': resp}
++        except Exception as e:
++            logger.error(f"Erro no health check: {e}")
++            return {'success': False, 'error': str(e)}
