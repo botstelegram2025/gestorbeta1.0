@@ -32,18 +32,29 @@ class BaileysAPI:
     # prefixo de sessão por usuário
     SESSION_PREFIX = "user_"
 
-    def __init__(self):
-        """Inicializa a integração com Baileys API"""
-        raw = os.getenv("BAILEYS_API_URL", "http://localhost:3000").strip()
-        if not urlparse(raw).scheme:
-            raw = "http://" + raw
-        self.base_url = raw.rstrip("/")
-        self.api_key = os.getenv("BAILEYS_API_KEY", "")
-        self.timeout = int(os.getenv("BAILEYS_TIMEOUT", "30"))
-        self.max_retries = int(os.getenv("BAILEYS_MAX_RETRIES", "3"))
-        self.retry_delay = int(os.getenv("BAILEYS_RETRY_DELAY", "5"))
-        self.message_delay = int(os.getenv("BAILEYS_MESSAGE_DELAY", "2"))
-        self.auto_reconnect = os.getenv("BAILEYS_AUTO_RECONNECT", "true").lower() == "true"
+   from urllib.parse import urlparse
+import os
+
+def __init__(self):
+    """Inicializa a integração com Baileys API"""
+    # Se a env BAILEYS_API_URL não estiver setada, usa a interna do Railway
+    raw = os.getenv(
+        "BAILEYS_API_URL",
+        "http://baileys-local-persist.railway.internal:3000"
+    ).strip().rstrip("/")
+
+    # Se a pessoa colocar só "baileys-local-persist.railway.internal:3000"
+    # sem http://, adiciona automaticamente
+    if not urlparse(raw).scheme:
+        raw = "http://" + raw
+
+    self.base_url = raw
+    self.api_key = os.getenv("BAILEYS_API_KEY", "")
+    self.timeout = int(os.getenv("BAILEYS_TIMEOUT", "30"))
+    self.max_retries = int(os.getenv("BAILEYS_MAX_RETRIES", "3"))
+    self.retry_delay = int(os.getenv("BAILEYS_RETRY_DELAY", "5"))
+    self.message_delay = int(os.getenv("BAILEYS_MESSAGE_DELAY", "2"))
+    self.auto_reconnect = os.getenv("BAILEYS_AUTO_RECONNECT", "true").lower() == "true"
 
         self.headers = {
             "Content-Type": "application/json",
