@@ -76,7 +76,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 MERCADOPAGO_ACCESS_TOKEN = os.environ.get('MERCADOPAGO_ACCESS_TOKEN')
 
 # URLs da API Baileys (assumindo servidor Node.js separado)
-BAILEYS_BASE_URL = 'http://localhost:3000'
+BAILEYS_BASE_URL = 'http://baileys-local-persist.railway.internal:3000'
 BAILEYS_SEND_URL = f'{BAILEYS_BASE_URL}/send-message'
 BAILEYS_STATUS_URL = f'{BAILEYS_BASE_URL}/status'
 BAILEYS_QR_URL = f'{BAILEYS_BASE_URL}/qr'
