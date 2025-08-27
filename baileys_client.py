@@ -2,7 +2,7 @@
 import os, requests
 from urllib.parse import urlparse
 
-_raw = os.getenv("BAILEYS_API_URL", "http://localhost:3000").rstrip("/")
+_raw = os.getenv("BAILEYS_API_URL", "http://baileys-local-persist.railway.internal:3000").rstrip("/")
 if not urlparse(_raw).scheme:
     _raw = "http://" + _raw
 BASE = _raw  # ex.: http://baileys-local-persist.railway.internal:3000
