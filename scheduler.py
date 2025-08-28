@@ -1,22 +1,21 @@
 """
-Sistema de Agendamento de Mensagens
+Sistema de Agendamento de Mensagens (versão funcional c/ bootstrap + backfill)
 - Respeita horários definidos por USUÁRIO (fallback global)
-- Montagem da fila às 05:00; cada mensagem do dia é agendada no HH:MM do usuário
+- Fila do dia: criada às 05:00 + no bootstrap de inicialização + backfill periódico
 - Worker minutal envia quando chegar o horário (America/Sao_Paulo)
-- Jobs principais: verificação 05:00, alertas por usuário no horário escolhido, limpeza, worker minutal
-- (Removido) job de envio diário global para evitar conflito com horários por usuário
+- Jobs principais: verificação 05:00, backfill 30/30 min, limpeza, worker minutal
 """
 
-import asyncio
 import logging
 import threading
 from datetime import datetime, timedelta, time as dtime
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-from utils import agora_br, formatar_data_br, formatar_datetime_br
 import pytz
 import time as _time
+
+from utils import agora_br, formatar_datetime_br  # garanta tz-aware em agora_br()
 
 logger = logging.getLogger(__name__)
 
@@ -28,37 +27,71 @@ class MessageScheduler:
         self.baileys_api = baileys_api
         self.template_manager = template_manager
 
-        # Usar BackgroundScheduler para compatibilidade com threading
+        # Scheduler com timezone fixo de SP e defaults seguros
         self.scheduler = BackgroundScheduler(
             timezone=pytz.timezone('America/Sao_Paulo'),
             job_defaults={
                 'coalesce': True,
                 'max_instances': 1,
-                'misfire_grace_time': 300  # 5 minutos de tolerância
+                'misfire_grace_time': 300  # 5 min
             }
         )
         self.tz = self.scheduler.timezone
         self.running = False
         self.ultima_verificacao_time = None
+        self.bot = None  # pode ser setado via set_bot_instance
 
-        # Configurar jobs principais
+        # Configura jobs principais
         self._setup_main_jobs()
+
+    # ===================== Helpers de timezone =====================
+    def _ensure_aware(self, dt):
+        """Converte datetime (ou string) para tz-aware em America/Sao_Paulo."""
+        if dt is None:
+            return None
+        try:
+            # Se vier string do banco (ISO etc.)
+            if isinstance(dt, str):
+                # Tenta ISO first; aceita 'Z' como UTC
+                s = dt.replace('Z', '+00:00') if 'Z' in dt and '+' not in dt else dt
+                parsed = datetime.fromisoformat(s)
+                dt = parsed
+        except Exception:
+            # Último recurso: ignora parsing e trata abaixo como naive
+            pass
+
+        # Se ainda não é datetime, não há o que normalizar
+        if not isinstance(dt, datetime):
+            return dt
+
+        # Já é tz-aware
+        if dt.tzinfo is not None and dt.tzinfo.utcoffset(dt) is not None:
+            return dt.astimezone(self.tz)
+
+        # É naive -> localiza em SP
+        try:
+            return self.tz.localize(dt)
+        except Exception:
+            # fallback: assume como "horário local" de SP
+            return dt.replace(tzinfo=self.tz)
 
     # ===================== Setup de Jobs =====================
     def _setup_main_jobs(self):
         """Configura os jobs principais do sistema"""
         try:
-            # Horários globais (usados apenas para verificação/limpeza/alertas); envio é por USUÁRIO
             horario_envio = self._get_horario_config_global('horario_envio', '09:00')
             horario_verificacao = self._get_horario_config_global('horario_verificacao', '09:00')
             horario_limpeza = self._get_horario_config_global('horario_limpeza', '02:00')
 
-            logger.info(f"Sistema usando horários globais (para jobs não-atômicos): Verificação {horario_verificacao}, Limpeza {horario_limpeza}")
+            logger.info(
+                f"Sistema usando horários globais (para jobs não-atômicos): "
+                f"Verificação {horario_verificacao}, Limpeza {horario_limpeza}"
+            )
             logger.info("Envios aos clientes são agendados por usuário (HH:MM individual)")
 
-            # Parse com fallback seguro
+            # Parse seguro
             try:
-                _, _ = map(int, horario_envio.split(':'))  # apenas validação
+                _ = list(map(int, horario_envio.split(':')))     # validação
                 hora_verif, min_verif = map(int, horario_verificacao.split(':'))
                 hora_limp, min_limp = map(int, horario_limpeza.split(':'))
             except ValueError as e:
@@ -66,43 +99,42 @@ class MessageScheduler:
                 hora_verif, min_verif = 9, 0
                 hora_limp, min_limp = 2, 0
 
-            # Limpar jobs existentes antes de criar novos
-            job_ids = [
-                'envio_diario_9h',           # será removido (não mais usado)
+            # Limpa jobs antigos por id
+            for job_id in [
+                'envio_diario_9h',          # legado: não usamos mais
                 'limpar_fila',
                 'alertas_usuarios',
                 'verificacao_5h',
+                'verificacao_backfill',
+                'verificacao_bootstrap',
                 'processar_fila_minuto'
-            ]
-            for job_id in job_ids:
+            ]:
                 try:
-                    if self.scheduler.get_job(job_id):
+                    job = self.scheduler.get_job(job_id)
+                    if job:
                         self.scheduler.remove_job(job_id)
                 except Exception:
                     pass
 
-            # (Removido) Envio diário global - agora o envio é sempre por usuário
-            # self.scheduler.add_job(... id='envio_diario_9h' ...)
-
-            # Limpeza da fila no horário configurado
+            # Limpeza
             self.scheduler.add_job(
                 func=self._limpar_fila_antiga,
                 trigger=CronTrigger(hour=hora_limp, minute=min_limp, timezone=self.scheduler.timezone),
                 id='limpar_fila',
-                name=f'Limpar Fila Antiga às {horario_limpeza}',
+                name=f'Limpar Fila Antiga às {hora_limp:02d}:{min_limp:02d}',
                 replace_existing=True
             )
 
-            # Alerta diário para usuários (cada um recebe somente dos seus clientes)
+            # Alertas diários (por usuário)
             self.scheduler.add_job(
                 func=self._enviar_alertas_usuarios,
                 trigger=CronTrigger(hour=hora_verif, minute=min_verif, timezone=self.scheduler.timezone),
                 id='alertas_usuarios',
-                name=f'Alertas Diários por Usuário às {horario_verificacao}',
+                name=f'Alertas Diários por Usuário às {hora_verif:02d}:{min_verif:02d}',
                 replace_existing=True
             )
 
-            # Verificação diária às 05:00 para montar a fila do dia (usando horário por usuário)
+            # Verificação diária às 05:00 (monta fila do dia)
             self.scheduler.add_job(
                 func=self._verificar_e_agendar_mensagens_do_dia,
                 trigger=CronTrigger(hour=5, minute=0, timezone=self.scheduler.timezone),
@@ -111,7 +143,18 @@ class MessageScheduler:
                 replace_existing=True
             )
 
-            # Worker da fila: roda todo minuto (segundo 0)
+            # Backfill periódico (a cada 30 minutos): garante fila caso tenha havido queda/restart
+            self.scheduler.add_job(
+                func=self._verificar_e_agendar_mensagens_do_dia,
+                trigger=CronTrigger(minute='*/30', timezone=self.scheduler.timezone),
+                id='verificacao_backfill',
+                name='Backfill de verificação (*/30 min)',
+                replace_existing=True,
+                coalesce=True,
+                misfire_grace_time=600
+            )
+
+            # Worker da fila: roda todo minuto no segundo 0
             self.scheduler.add_job(
                 func=self._processar_fila_mensagens,
                 trigger=CronTrigger(second=0, timezone=self.scheduler.timezone),
@@ -123,7 +166,11 @@ class MessageScheduler:
             )
 
             jobs_count = len(self.scheduler.get_jobs())
-            logger.info(f"Jobs principais configurados - Verificação: {horario_verificacao}, Limpeza: {horario_limpeza} | Total: {jobs_count}")
+            logger.info(
+                f"Jobs principais configurados. "
+                f"Verificação: {hora_verif:02d}:{min_verif:02d}, "
+                f"Limpeza: {hora_limp:02d}:{min_limp:02d} | Total: {jobs_count}"
+            )
 
         except Exception as e:
             logger.error(f"Erro ao configurar jobs principais: {e}")
@@ -131,12 +178,35 @@ class MessageScheduler:
 
     # ===================== Controle do Scheduler =====================
     def start(self):
-        """Inicia o agendador"""
+        """Inicia o agendador, agenda bootstrap imediato e exibe diagnóstico"""
         try:
-            if not self.running:
-                self.scheduler.start()
-                self.running = True
-                logger.info("Agendador de mensagens iniciado com sucesso!")
+            if self.running and self.scheduler.running:
+                logger.info("Agendador já está em execução")
+                return
+
+            self.scheduler.start()
+            self.running = True
+            logger.info("Agendador de mensagens iniciado com sucesso!")
+
+            # Bootstrap: monta a fila do dia na inicialização (em ~3s)
+            run_at = self._ensure_aware(agora_br() + timedelta(seconds=3))
+            try:
+                self.scheduler.add_job(
+                    func=self._verificar_e_agendar_mensagens_do_dia,
+                    trigger=DateTrigger(run_date=run_at),
+                    id='verificacao_bootstrap',
+                    name='Bootstrap: montar fila do dia na inicialização',
+                    replace_existing=True,
+                )
+                logger.info("Bootstrap de verificação agendado para agora (+3s).")
+            except Exception as e:
+                logger.warning(f"Falha ao agendar bootstrap: {e}. Rodando diretamente agora.")
+                # fallback: roda imediato
+                self._verificar_e_agendar_mensagens_do_dia()
+
+            # Log de diagnóstico
+            self.debug_timezone()
+
         except Exception as e:
             logger.error(f"Erro ao iniciar agendador: {e}")
 
@@ -167,27 +237,37 @@ class MessageScheduler:
             self.ultima_verificacao_time = agora_br()
             logger.info("Iniciando processamento da fila de mensagens...")
 
-            mensagens_pendentes = self.db.obter_mensagens_pendentes(limit=50)
+            mensagens_pendentes = self.db.obter_mensagens_pendentes(limit=100) or []
 
             if not mensagens_pendentes:
                 logger.info("Nenhuma mensagem pendente para processamento")
                 return
 
-            logger.info(f"Processando {len(mensagens_pendentes)} mensagens pendentes")
+            logger.info(f"Encontradas {len(mensagens_pendentes)} mensagens pendentes")
+            # Debug: mostra 5 próximas
+            for preview in mensagens_pendentes[:5]:
+                logger.info(
+                    f"[Fila] id={preview.get('id')} cliente={preview.get('cliente_nome')} "
+                    f"tipo={preview.get('tipo_mensagem')} agendado_para={preview.get('agendado_para')}"
+                )
 
+            agora = agora_br()
             for mensagem in mensagens_pendentes:
                 try:
-                    ag = mensagem.get('agendado_para')
-                    agora = agora_br()
-                    if ag and ag > agora:
-                        # ainda não é hora
+                    ag = self._ensure_aware(mensagem.get('agendado_para'))
+                    # Se veio sem agendamento, envia imediatamente
+                    if ag is None or ag <= agora:
+                        self._enviar_mensagem_fila(mensagem)
+                        _time.sleep(1.5)  # polidez com a API
+                    else:
+                        # Ainda não é hora
                         continue
-                    self._enviar_mensagem_fila(mensagem)
-                    # Aguardar entre envios para não sobrecarregar
-                    _time.sleep(2)
                 except Exception as e:
                     logger.error(f"Erro ao processar mensagem ID {mensagem.get('id')}: {e}")
-                    self.db.marcar_mensagem_processada(mensagem['id'], False, str(e))
+                    try:
+                        self.db.marcar_mensagem_processada(mensagem['id'], False, str(e))
+                    except Exception:
+                        pass
 
             logger.info("Processamento da fila concluído")
 
@@ -199,16 +279,18 @@ class MessageScheduler:
         try:
             # Verificar se cliente ainda está ativo
             cliente = self.db.buscar_cliente_por_id(mensagem['cliente_id'])
-            if not cliente or not cliente.get('ativo'):
+            if not cliente or not cliente.get('ativo', True):
                 logger.info(f"Cliente {mensagem['cliente_id']} inativo, removendo da fila")
-                self.db.marcar_mensagem_processada(mensagem['id'], True)
+                self.db.marcar_mensagem_processada(mensagem['id'], True, "cliente_inativo")
                 return
 
-            # Enviar mensagem via Baileys - incluir chat_id_usuario obrigatório
-            chat_id_usuario = mensagem.get('chat_id_usuario') or cliente.get('chat_id_usuario')
+            chat_id_usuario = (
+                mensagem.get('chat_id_usuario')
+                or cliente.get('chat_id_usuario')
+            )
             if not chat_id_usuario:
                 logger.error(f"Mensagem ID {mensagem['id']} sem chat_id_usuario - não pode enviar WhatsApp")
-                self.db.marcar_mensagem_processada(mensagem['id'], False, "chat_id_usuario não encontrado")
+                self.db.marcar_mensagem_processada(mensagem['id'], False, "chat_id_usuario ausente")
                 return
 
             resultado = self.baileys_api.send_message(
@@ -218,7 +300,7 @@ class MessageScheduler:
             )
 
             if resultado and resultado.get('success'):
-                # Registrar envio bem-sucedido
+                # Registrar envio OK
                 self.db.registrar_envio(
                     cliente_id=mensagem['cliente_id'],
                     template_id=mensagem['template_id'],
@@ -226,18 +308,17 @@ class MessageScheduler:
                     mensagem=mensagem['mensagem'],
                     tipo_envio='automatico',
                     sucesso=True,
-                    message_id=resultado.get('message_id')
+                    message_id=resultado.get('message_id'),
+                    chat_id_usuario=chat_id_usuario
                 )
-
-                # Marcar como processado
-                self.db.marcar_mensagem_processada(mensagem['id'], True)
-
-                logger.info(f"Mensagem enviada com sucesso para {mensagem.get('cliente_nome')} ({mensagem['telefone']})")
-
+                # Marcar processado
+                self.db.marcar_mensagem_processada(mensagem['id'], True, "enviado")
+                logger.info(
+                    f"Mensagem enviada: {mensagem.get('cliente_nome')} ({mensagem['telefone']}) | "
+                    f"tipo={mensagem.get('tipo_mensagem')}"
+                )
             else:
-                # Registrar falha
                 erro = (resultado or {}).get('error', 'Erro desconhecido')
-
                 self.db.registrar_envio(
                     cliente_id=mensagem['cliente_id'],
                     template_id=mensagem['template_id'],
@@ -245,12 +326,10 @@ class MessageScheduler:
                     mensagem=mensagem['mensagem'],
                     tipo_envio='automatico',
                     sucesso=False,
-                    erro=erro
+                    erro=erro,
+                    chat_id_usuario=chat_id_usuario
                 )
-
-                # Incrementar tentativas
                 self.db.marcar_mensagem_processada(mensagem['id'], False, erro)
-
                 logger.error(f"Falha ao enviar mensagem para {mensagem.get('cliente_nome')}: {erro}")
 
         except Exception as e:
@@ -260,9 +339,9 @@ class MessageScheduler:
             except Exception:
                 pass
 
-    # ===================== Envio diário por usuário (LEGADO / opcional) =====================
+    # ===================== Envio diário por usuário (LEGADO/Manual) =====================
     def _processar_envio_diario_9h(self):
-        """Mantido para compatibilidade/uso manual. NÃO é mais agendado automaticamente."""
+        """Mantido para compatibilidade/uso manual. NÃO é agendado automaticamente."""
         try:
             logger.info("=== ENVIO DIÁRIO (manual) ===")
             hoje = agora_br().date()
@@ -289,7 +368,7 @@ class MessageScheduler:
                     SELECT DISTINCT chat_id, nome
                     FROM usuarios 
                     WHERE plano_ativo = true
-                    AND (status = 'ativo' OR status = 'teste_gratuito')
+                      AND (status = 'ativo' OR status = 'teste_gratuito')
                     ORDER BY chat_id
                     """
                 )
@@ -302,14 +381,12 @@ class MessageScheduler:
     def _processar_clientes_usuario(self, chat_id_usuario, hoje):
         """Processa clientes de um usuário específico (envio imediato, fora da fila)"""
         try:
-            # Verificar se este usuário tem horário personalizado de envio (somente log informativo)
             horario_usuario = self._get_horario_config_usuario('horario_envio', chat_id_usuario, None)
             if horario_usuario:
                 hora_atual = agora_br().strftime('%H:%M')
                 if horario_usuario != hora_atual[:5]:
-                    logger.info(f"Usuário {chat_id_usuario} tem horário personalizado {horario_usuario}, mas execução manual agora é {hora_atual}")
+                    logger.info(f"Usuário {chat_id_usuario} tem horário {horario_usuario}, mas execução manual agora é {hora_atual}")
 
-            # Buscar clientes APENAS deste usuário
             clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id_usuario)
             if not clientes:
                 logger.debug(f"Usuário {chat_id_usuario}: Nenhum cliente ativo encontrado")
@@ -319,6 +396,8 @@ class MessageScheduler:
             for cliente in clientes:
                 try:
                     vencimento = cliente['vencimento']
+                    if not hasattr(vencimento, 'toordinal'):  # se não for date/datetime
+                        continue
                     dias_vencimento = (vencimento - hoje).days
 
                     if dias_vencimento == -1:
@@ -351,6 +430,8 @@ class MessageScheduler:
             for cliente in clientes:
                 try:
                     vencimento = cliente['vencimento']
+                    if not hasattr(vencimento, 'toordinal'):
+                        continue
                     dias_vencimento = (vencimento - hoje).days
 
                     if dias_vencimento < 0:
@@ -382,12 +463,10 @@ class MessageScheduler:
                 logger.error(f"Cliente {cliente.get('nome')} sem chat_id_usuario - não pode enviar WhatsApp")
                 return False
 
-            # Verificar preferências
             if not self._cliente_pode_receber_mensagem(cliente, tipo_template):
                 logger.info(f"Cliente {cliente['nome']} optou por não receber mensagens do tipo {tipo_template}")
                 return False
 
-            # Buscar template com isolamento por usuário
             template = self.db.obter_template_por_tipo(tipo_template, resolved_chat_id)
             if not template:
                 logger.warning(f"Template {tipo_template} não encontrado para usuário {resolved_chat_id}")
@@ -395,12 +474,10 @@ class MessageScheduler:
 
             mensagem = self.template_manager.processar_template(template['conteudo'], cliente)
 
-            # Evitar duplicidade diária
             if self._ja_enviada_hoje(cliente['id'], template['id']):
                 logger.info(f"Mensagem {tipo_template} já enviada hoje para {cliente['nome']}")
                 return False
 
-            # Enviar via WhatsApp
             resultado = self.baileys_api.send_message(cliente['telefone'], mensagem, resolved_chat_id)
             sucesso = resultado.get('success', False) if resultado else False
 
@@ -423,34 +500,28 @@ class MessageScheduler:
             return False
 
     def _cliente_pode_receber_mensagem(self, cliente, tipo_template):
-        """Verifica se o cliente pode receber mensagens baseado nas preferências de notificação"""
+        """Verifica preferências de notificação por tipo"""
         try:
             cliente_id = cliente['id']
             chat_id_usuario = cliente.get('chat_id_usuario')
 
             if hasattr(self.db, 'cliente_pode_receber_cobranca'):
                 if tipo_template in ['vencimento_1dia_apos', 'vencimento_hoje', 'vencimento_2dias']:
-                    pode_receber = self.db.cliente_pode_receber_cobranca(cliente_id, chat_id_usuario)
-                    logger.info(f"Cliente {cliente['nome']}: pode receber cobrança = {pode_receber}")
-                    return pode_receber
+                    return self.db.cliente_pode_receber_cobranca(cliente_id, chat_id_usuario)
                 else:
-                    pode_receber = self.db.cliente_pode_receber_notificacoes(cliente_id, chat_id_usuario)
-                    logger.info(f"Cliente {cliente['nome']}: pode receber notificações = {pode_receber}")
-                    return pode_receber
+                    return self.db.cliente_pode_receber_notificacoes(cliente_id, chat_id_usuario)
             else:
-                logger.warning("Métodos de verificação de preferências não disponíveis - permitindo envio")
+                logger.warning("Métodos de preferências não disponíveis - permitindo envio")
                 return True
         except Exception as e:
-            logger.error(f"Erro ao verificar preferências de notificação: {e}")
-            return True  # Em caso de erro, permitir envio para manter funcionalidade
+            logger.error(f"Erro ao verificar preferências: {e}")
+            return True  # falha aberta para não travar operação
 
-    # ===================== Rotinas de verificação / agendamento =====================
+    # ===================== Verificação / Agendamento =====================
     def _verificar_e_agendar_mensagens_do_dia(self):
-        """Verifica todos os clientes às 5h e agenda APENAS mensagens que devem ser enviadas hoje (no horário do usuário)"""
+        """Verifica clientes e agenda APENAS mensagens que devem ser enviadas HOJE (no horário do usuário)."""
         try:
-            logger.info("=== VERIFICAÇÃO DIÁRIA ÀS 5H ===")
-            logger.info("Verificando clientes e agendando mensagens apenas para hoje...")
-
+            logger.info("=== VERIFICAÇÃO DIÁRIA (fila do dia) ===")
             clientes = self.db.listar_clientes(apenas_ativos=True)
             if not clientes:
                 logger.info("Nenhum cliente ativo encontrado")
@@ -461,40 +532,40 @@ class MessageScheduler:
             for cliente in clientes:
                 try:
                     vencimento = cliente['vencimento']
+                    if not hasattr(vencimento, 'toordinal'):
+                        continue
                     dias_vencimento = (vencimento - hoje).days
 
                     if dias_vencimento == -1:
                         self._agendar_mensagem_vencimento(cliente, 'vencimento_1dia_apos', hoje)
                         contador_agendadas += 1
-                    elif dias_vencimento < -1:
-                        logger.info(f"⏭️  {cliente['nome']} vencido há {abs(dias_vencimento)} dias - ignorado no agendamento automático")
                     elif dias_vencimento == 0:
                         self._agendar_mensagem_vencimento(cliente, 'vencimento_hoje', hoje)
                         contador_agendadas += 1
                     elif dias_vencimento in (1, 2):
                         self._agendar_mensagem_vencimento(cliente, 'vencimento_2dias', hoje)
                         contador_agendadas += 1
+                    else:
+                        # Ignora >2 dias e <<-1 para agendamento automático diário
+                        pass
                 except Exception as e:
-                    logger.error(f"Erro ao verificar cliente {cliente['nome']}: {e}")
+                    logger.error(f"Erro ao verificar cliente {cliente.get('nome')}: {e}")
 
             logger.info(f"=== VERIFICAÇÃO CONCLUÍDA: {contador_agendadas} mensagens agendadas para HOJE ===")
         except Exception as e:
-            logger.error(f"Erro na verificação diária às 5h: {e}")
+            logger.error(f"Erro na verificação diária: {e}")
 
     def _agendar_mensagem_vencimento(self, cliente, tipo_template, data_envio):
         """Agenda mensagem específica de vencimento para envio no mesmo dia, no HH:MM do USUÁRIO."""
         try:
-            # Buscar template correspondente (isolado por usuário)
             template = self.db.obter_template_por_tipo(tipo_template, chat_id_usuario=cliente.get('chat_id_usuario'))
             if not template:
-                logger.warning(f"Template {tipo_template} não encontrado")
+                logger.warning(f"Template {tipo_template} não encontrado (cliente {cliente.get('nome')})")
                 return
 
-            # Processar template com dados do cliente
             mensagem = self.template_manager.processar_template(template['conteudo'], cliente)
 
-            # === HORÁRIO POR USUÁRIO ===
-            agora = agora_br()
+            # HH:MM por USUÁRIO com fallback global
             hhmm = self._get_horario_config_usuario(
                 'horario_envio',
                 cliente.get('chat_id_usuario'),
@@ -505,52 +576,57 @@ class MessageScheduler:
             except Exception:
                 h, m = 12, 0  # fallback robusto
 
-            alvo = self.tz.localize(datetime.combine(data_envio, dtime(h, m)))
+            alvo = self._ensure_aware(datetime.combine(data_envio, dtime(h, m)))
 
-            # Se já passou do horário do usuário hoje, manda ainda hoje em até 10 minutos
-            if agora > alvo:
+            # Se já passou do horário do usuário hoje: reprograma para agora + 10min (até 23:59)
+            agora = agora_br()
+            if alvo <= agora:
                 limite_hoje = agora.replace(hour=23, minute=59, second=0, microsecond=0)
                 alvo = min(agora + timedelta(minutes=10), limite_hoje)
 
-            # Evitar duplicata para o mesmo dia
+            # Evitar duplicidade para o mesmo dia
             if self.db.verificar_mensagem_existente(cliente['id'], template['id'], data_envio):
                 logger.info(f"Mensagem {tipo_template} já agendada para {cliente['nome']}")
                 return
 
-            # Adicionar na fila para o horário do usuário
+            # Adicionar na fila
             self.db.adicionar_fila_mensagem(
                 cliente_id=cliente['id'],
                 template_id=template['id'],
                 telefone=cliente['telefone'],
                 mensagem=mensagem,
                 tipo_mensagem=tipo_template,
-                agendado_para=alvo
+                agendado_para=alvo,
+                chat_id_usuario=cliente.get('chat_id_usuario')
             )
 
-            logger.info(f"Mensagem {tipo_template} agendada para {cliente['nome']} - ENVIO: {alvo.strftime('%d/%m/%Y %H:%M')}")
+            logger.info(
+                f"Agendado {tipo_template} para {cliente['nome']} | "
+                f"ENVIO: {alvo.strftime('%d/%m/%Y %H:%M')}"
+            )
 
         except Exception as e:
             logger.error(f"Erro ao agendar mensagem de vencimento: {e}")
 
     # ===================== Limpeza / Cancelamento =====================
     def _limpar_fila_antiga(self):
-        """Remove mensagens antigas processadas da fila e mensagens futuras desnecessárias"""
+        """Remove mensagens antigas processadas da fila e futuras desnecessárias"""
         try:
             logger.info("Iniciando limpeza da fila antiga...")
             removidas_antigas = self.db.limpar_fila_processadas(dias=7)
             removidas_futuras = self.db.limpar_mensagens_futuras()
-            logger.info(f"Limpeza concluída: {removidas_antigas} mensagens antigas e {removidas_futuras} mensagens futuras removidas")
+            logger.info(
+                f"Limpeza concluída: {removidas_antigas} mensagens antigas e "
+                f"{removidas_futuras} futuras removidas"
+            )
         except Exception as e:
             logger.error(f"Erro na limpeza da fila: {e}")
 
     def cancelar_mensagens_cliente_renovado(self, cliente_id):
         """Cancela todas as mensagens pendentes na fila quando cliente é renovado"""
         try:
-            logger.info(f"Cancelando mensagens na fila para cliente renovado ID: {cliente_id}")
-            mensagens_pendentes = self.db.buscar_mensagens_fila_cliente(cliente_id, apenas_pendentes=True)
-            if not mensagens_pendentes:
-                logger.info(f"Nenhuma mensagem pendente encontrada para cliente ID: {cliente_id}")
-                return 0
+            logger.info(f"Cancelando mensagens pendentes para cliente ID: {cliente_id}")
+            mensagens_pendentes = self.db.buscar_mensagens_fila_cliente(cliente_id, apenas_pendentes=True) or []
             canceladas = 0
             for mensagem in mensagens_pendentes:
                 try:
@@ -558,7 +634,7 @@ class MessageScheduler:
                         canceladas += 1
                         logger.info(f"Mensagem ID {mensagem['id']} cancelada (cliente renovado)")
                 except Exception as e:
-                    logger.error(f"Erro ao cancelar mensagem ID {mensagem.get('id', 'unknown')}: {e}")
+                    logger.error(f"Erro ao cancelar mensagem ID {mensagem.get('id')}: {e}")
             logger.info(f"Cliente renovado: {canceladas} mensagens canceladas da fila")
             return canceladas
         except Exception as e:
@@ -567,12 +643,12 @@ class MessageScheduler:
 
     # ===================== Alertas (admin/usuário) =====================
     def _enviar_alertas_usuarios(self):
-        """Envia alerta diário isolado para cada usuário sobre APENAS seus clientes e dispara alertas do sistema."""
+        """Envia alerta diário isolado para cada usuário e dispara alertas do sistema."""
         try:
             import os
-            logger.info("Enviando alertas diários isolados por usuário...")
+            logger.info("Enviando alertas diários por usuário...")
 
-            # Dispara alertas do sistema (teste/renovação) para amanhã
+            # Alertas do sistema (teste/renovação) para amanhã
             try:
                 amanha = agora_br().date() + timedelta(days=1)
                 self._verificar_usuarios_sistema(amanha)
@@ -596,25 +672,28 @@ class MessageScheduler:
             logger.error(f"Erro no envio de alertas diários: {e}")
 
     def _enviar_alerta_usuario_individual(self, chat_id_usuario):
-        """Envia alerta individual para um usuário específico sobre APENAS seus clientes"""
+        """Alerta individual para um usuário específico"""
         try:
             import os
             logger.info(f"Enviando alerta diário para usuário {chat_id_usuario}...")
 
-            # Loga preferência individual (execução é centralizada)
             horario_alerta_usuario = self._get_horario_config_usuario('horario_verificacao', chat_id_usuario, None)
             if horario_alerta_usuario:
                 hora_atual = agora_br().strftime('%H:%M')
                 if horario_alerta_usuario != hora_atual[:5]:
-                    logger.info(f"Usuário {chat_id_usuario} prefere alertas às {horario_alerta_usuario}, mas executando no horário global por eficiência")
+                    logger.info(
+                        f"Usuário {chat_id_usuario} prefere alertas às {horario_alerta_usuario}, "
+                        f"mas execução é no horário global"
+                    )
 
             hoje = agora_br().date()
             clientes_hoje, clientes_proximos, clientes_vencidos = [], [], []
-
-            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id_usuario)
+            clientes = self.db.listar_clientes(apenas_ativos=True, chat_id_usuario=chat_id_usuario) or []
             for cliente in clientes:
                 try:
                     vencimento = cliente['vencimento']
+                    if not hasattr(vencimento, 'toordinal'):
+                        continue
                     dias_diferenca = (vencimento - hoje).days
                     if dias_diferenca == 0:
                         clientes_hoje.append(cliente)
@@ -632,32 +711,31 @@ class MessageScheduler:
 """
                 if clientes_vencidos:
                     mensagem += f"🔴 *VENCIDOS ({len(clientes_vencidos)}):*\n"
-                    for cliente in clientes_vencidos[:5]:
-                        dias_vencido = abs((cliente['vencimento'] - hoje).days)
-                        mensagem += f"• {cliente['nome']} - há {dias_vencido} dias\n"
+                    for c in clientes_vencidos[:5]:
+                        dias_vencido = abs((c['vencimento'] - hoje).days)
+                        mensagem += f"• {c['nome']} - há {dias_vencido} dias\n"
                     if len(clientes_vencidos) > 5:
-                        mensagem += f"• +{len(clientes_vencidos) - 5} outros vencidos\n"
-                    mensagem += "\n"
+                        mensagem += f"• +{len(clientes_vencidos) - 5} outros vencidos\n\n"
+                    else:
+                        mensagem += "\n"
+
                 if clientes_hoje:
                     mensagem += f"⚠️ *VENCEM HOJE ({len(clientes_hoje)}):*\n"
-                    for cliente in clientes_hoje:
-                        mensagem += f"• {cliente['nome']} - R$ {cliente['valor']:.2f}\n"
+                    for c in clientes_hoje:
+                        try:
+                            mensagem += f"• {c['nome']} - R$ {c['valor']:.2f}\n"
+                        except Exception:
+                            mensagem += f"• {c['nome']}\n"
                     mensagem += "\n"
+
                 if clientes_proximos:
                     mensagem += f"📅 *PRÓXIMOS 7 DIAS ({len(clientes_proximos)}):*\n"
-                    for cliente in clientes_proximos[:5]:
-                        dias_restantes = (cliente['vencimento'] - hoje).days
-                        mensagem += f"• {cliente['nome']} - {dias_restantes} dias\n"
+                    for c in clientes_proximos[:5]:
+                        dias_restantes = (c['vencimento'] - hoje).days
+                        mensagem += f"• {c['nome']} - {dias_restantes} dias\n"
                     if len(clientes_proximos) > 5:
                         mensagem += f"• +{len(clientes_proximos) - 5} outros próximos\n"
                     mensagem += "\n"
-                mensagem += f"""📊 *RESUMO:*
-• Total clientes ativos: {len(clientes)}
-• Vencidos: {len(clientes_vencidos)}
-• Vencem hoje: {len(clientes_hoje)}
-• Próximos 7 dias: {len(clientes_proximos)}
-
-💡 Use o comando `/vencimentos` para ver detalhes"""
 
                 admin_chat_id = os.getenv('ADMIN_CHAT_ID')
                 if admin_chat_id:
@@ -676,9 +754,9 @@ Tudo sob controle! 👍"""
                 if admin_chat_id:
                     self._enviar_para_admin(admin_chat_id, mensagem)
 
-            logger.info("Alerta diário enviado para administrador")
+            logger.info("Alerta diário enviado (admin)")
         except Exception as e:
-            logger.error(f"Erro ao enviar alerta para administrador: {e}")
+            logger.error(f"Erro ao enviar alerta diário: {e}")
 
     def _enviar_para_admin(self, admin_chat_id, mensagem):
         """Envia mensagem para o administrador via Telegram"""
@@ -692,12 +770,7 @@ Tudo sob controle! 👍"""
                 return
 
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            data = {
-                'chat_id': admin_chat_id,
-                'text': mensagem,
-                'parse_mode': 'Markdown'
-            }
-
+            data = {'chat_id': admin_chat_id, 'text': mensagem, 'parse_mode': 'Markdown'}
             response = requests.post(url, data=data, timeout=10)
 
             if response.status_code == 200:
@@ -709,7 +782,6 @@ Tudo sob controle! 👍"""
 
     # ===================== Usuários do sistema (teste/renovação) =====================
     def _verificar_usuarios_sistema(self, data_vencimento):
-        """Verifica usuários do sistema que precisam de alerta de pagamento"""
         try:
             self._verificar_usuarios_teste_vencendo(data_vencimento)
             self._verificar_usuarios_pagos_vencendo(data_vencimento)
@@ -725,19 +797,13 @@ Tudo sob controle! 👍"""
                     SELECT chat_id, nome, email, fim_periodo_teste
                     FROM usuarios 
                     WHERE status = 'teste_gratuito' 
-                    AND plano_ativo = true
-                    AND DATE(fim_periodo_teste) = %s
+                      AND plano_ativo = true
+                      AND DATE(fim_periodo_teste) = %s
                     """,
                     (data_vencimento,)
                 )
-                usuarios_vencendo = cursor.fetchall()
-            if usuarios_vencendo:
-                logger.info(f"Encontrados {len(usuarios_vencendo)} usuários em teste vencendo em {data_vencimento}")
-                for usuario in usuarios_vencendo:
-                    try:
-                        self._enviar_alerta_teste_vencendo(dict(usuario))
-                    except Exception as e:
-                        logger.error(f"Erro ao enviar alerta para usuário {usuario.get('chat_id')}: {e}")
+                for usuario in cursor.fetchall() or []:
+                    self._enviar_alerta_teste_vencendo(dict(usuario))
         except Exception as e:
             logger.error(f"Erro ao verificar usuários em teste vencendo: {e}")
 
@@ -750,31 +816,23 @@ Tudo sob controle! 👍"""
                     SELECT chat_id, nome, email, proximo_vencimento
                     FROM usuarios 
                     WHERE status = 'pago' 
-                    AND plano_ativo = true
-                    AND DATE(proximo_vencimento) = %s
+                      AND plano_ativo = true
+                      AND DATE(proximo_vencimento) = %s
                     """,
                     (data_vencimento,)
                 )
-                usuarios_vencendo = cursor.fetchall()
-            if usuarios_vencendo:
-                logger.info(f"Encontrados {len(usuarios_vencendo)} usuários pagos vencendo em {data_vencimento}")
-                for usuario in usuarios_vencendo:
-                    try:
-                        self._enviar_alerta_renovacao(dict(usuario))
-                    except Exception as e:
-                        logger.error(f"Erro ao enviar alerta de renovação para usuário {usuario.get('chat_id')}: {e}")
+                for usuario in cursor.fetchall() or []:
+                    self._enviar_alerta_renovacao(dict(usuario))
         except Exception as e:
             logger.error(f"Erro ao verificar usuários pagos vencendo: {e}")
 
     def _enviar_alerta_teste_vencendo(self, usuario):
+        # (sem alterações substanciais)
         try:
             chat_id = usuario.get('chat_id')
             nome = usuario.get('nome', 'usuário')
             fim_teste = usuario.get('fim_periodo_teste')
-            if isinstance(fim_teste, datetime):
-                data_vencimento = fim_teste.strftime('%d/%m/%Y')
-            else:
-                data_vencimento = 'amanhã'
+            data_vencimento = fim_teste.strftime('%d/%m/%Y') if isinstance(fim_teste, datetime) else 'amanhã'
             mensagem = f"""⚠️ *TESTE GRATUITO VENCENDO!*
 
 Olá {nome}! 👋
@@ -791,19 +849,13 @@ Para continuar usando o sistema sem interrupções, você precisa ativar um plan
 
 Garanta já seu acesso! 👇"""
             inline_keyboard = [
-                [
-                    {'text': '💳 Gerar PIX - R$ 20,00', 'callback_data': f'gerar_pix_usuario_{chat_id}'},
-                ],
-                [
-                    {'text': '📞 Falar com Suporte', 'url': 'https://t.me/seu_suporte'},
-                    {'text': '❓ Dúvidas', 'callback_data': 'info_planos'}
-                ]
+                [{'text': '💳 Gerar PIX - R$ 20,00', 'callback_data': f'gerar_pix_usuario_{chat_id}'}],
+                [{'text': '📞 Falar com Suporte', 'url': 'https://t.me/seu_suporte'},
+                 {'text': '❓ Dúvidas', 'callback_data': 'info_planos'}]
             ]
-            if hasattr(self, 'bot') and self.bot:
+            if self.bot:
                 self.bot.send_message(
-                    chat_id,
-                    mensagem,
-                    parse_mode='Markdown',
+                    chat_id, mensagem, parse_mode='Markdown',
                     reply_markup={'inline_keyboard': inline_keyboard}
                 )
                 logger.info(f"Alerta de teste vencendo enviado para {nome} (ID: {chat_id})")
@@ -811,14 +863,12 @@ Garanta já seu acesso! 👇"""
             logger.error(f"Erro ao enviar alerta de teste vencendo: {e}")
 
     def _enviar_alerta_renovacao(self, usuario):
+        # (sem alterações substanciais)
         try:
             chat_id = usuario.get('chat_id')
             nome = usuario.get('nome', 'usuário')
             vencimento = usuario.get('proximo_vencimento')
-            if isinstance(vencimento, datetime):
-                data_vencimento = vencimento.strftime('%d/%m/%Y')
-            else:
-                data_vencimento = 'amanhã'
+            data_vencimento = vencimento.strftime('%d/%m/%Y') if isinstance(vencimento, datetime) else 'amanhã'
             mensagem = f"""🔄 *RENOVAÇÃO DE PLANO*
 
 Olá {nome}! 👋
@@ -834,19 +884,13 @@ Para manter o acesso ao sistema sem interrupções, renove seu plano agora!
 
 Renove agora e mantenha tudo funcionando! 👇"""
             inline_keyboard = [
-                [
-                    {'text': '🔄 Renovar - Gerar PIX R$ 20,00', 'callback_data': f'gerar_pix_renovacao_{chat_id}'},
-                ],
-                [
-                    {'text': '📞 Falar com Suporte', 'url': 'https://t.me/seu_suporte'},
-                    {'text': '📋 Minha Conta', 'callback_data': 'minha_conta'}
-                ]
+                [{'text': '🔄 Renovar - Gerar PIX R$ 20,00', 'callback_data': f'gerar_pix_renovacao_{chat_id}'}],
+                [{'text': '📞 Falar com Suporte', 'url': 'https://t.me/seu_suporte'},
+                 {'text': '📋 Minha Conta', 'callback_data': 'minha_conta'}]
             ]
-            if hasattr(self, 'bot') and self.bot:
+            if self.bot:
                 self.bot.send_message(
-                    chat_id,
-                    mensagem,
-                    parse_mode='Markdown',
+                    chat_id, mensagem, parse_mode='Markdown',
                     reply_markup={'inline_keyboard': inline_keyboard}
                 )
                 logger.info(f"Alerta de renovação enviado para {nome} (ID: {chat_id})")
@@ -857,7 +901,7 @@ Renove agora e mantenha tudo funcionando! 👇"""
         """Define a instância do bot para envio de mensagens"""
         self.bot = bot_instance
 
-    # ===================== Utilidades de Log / Duplicidade =====================
+    # ===================== Logs / Duplicidade =====================
     def _ja_enviada_hoje(self, cliente_id, template_id):
         """Verifica se a mensagem já foi enviada hoje para evitar duplicatas"""
         try:
@@ -866,7 +910,8 @@ Renove agora e mantenha tudo funcionando! 👇"""
                 with conn.cursor() as cursor:
                     cursor.execute(
                         """
-                        SELECT COUNT(*) FROM logs_envio 
+                        SELECT COUNT(*)
+                        FROM logs_envio 
                         WHERE cliente_id = %s 
                           AND template_id = %s
                           AND DATE(data_envio) = %s 
@@ -900,24 +945,23 @@ Renove agora e mantenha tudo funcionando! 👇"""
         try:
             template_boas_vindas = self.db.obter_template_por_tipo('boas_vindas', cliente.get('chat_id_usuario'))
             if template_boas_vindas:
-                mensagem_boas_vindas = self.template_manager.processar_template(
-                    template_boas_vindas['conteudo'], cliente
-                )
-                agendado_para = agora_br() + timedelta(minutes=5)  # tz-aware
+                mensagem = self.template_manager.processar_template(template_boas_vindas['conteudo'], cliente)
+                agendado_para = self._ensure_aware(agora_br() + timedelta(minutes=5))
                 self.db.adicionar_fila_mensagem(
                     cliente_id=cliente['id'],
                     template_id=template_boas_vindas['id'],
                     telefone=cliente['telefone'],
-                    mensagem=mensagem_boas_vindas,
+                    mensagem=mensagem,
                     tipo_mensagem='boas_vindas',
-                    agendado_para=agendado_para
+                    agendado_para=agendado_para,
+                    chat_id_usuario=cliente.get('chat_id_usuario')
                 )
-                logger.info(f"Mensagem de boas vindas agendada para novo cliente: {cliente['nome']}")
+                logger.info(f"Mensagem de boas-vindas agendada para novo cliente: {cliente['nome']}")
         except Exception as e:
             logger.error(f"Erro ao agendar mensagens para cliente: {e}")
 
     def agendar_mensagem_personalizada(self, cliente_id, template_id, data_hora):
-        """Agenda mensagem personalizada (espera data_hora tz-aware)"""
+        """Agenda mensagem personalizada (espera data_hora tz-aware, mas normaliza por garantia)"""
         try:
             cliente = self.db.buscar_cliente_por_id(cliente_id)
             template = self.db.obter_template(template_id)
@@ -930,7 +974,8 @@ Renove agora e mantenha tudo funcionando! 👇"""
                 telefone=cliente['telefone'],
                 mensagem=mensagem,
                 tipo_mensagem='personalizada',
-                agendado_para=data_hora
+                agendado_para=self._ensure_aware(data_hora),
+                chat_id_usuario=cliente.get('chat_id_usuario')
             )
             logger.info(f"Mensagem personalizada agendada para {cliente['nome']} - ID: {fila_id}")
             return fila_id
@@ -957,15 +1002,15 @@ Renove agora e mantenha tudo funcionando! 👇"""
     def obter_tarefas_pendentes(self):
         """Obtém lista de tarefas pendentes"""
         try:
-            mensagens = self.db.obter_mensagens_pendentes(limit=100)
+            mensagens = self.db.obter_mensagens_pendentes(limit=100) or []
             tarefas = []
             for msg in mensagens:
                 tarefas.append({
-                    'id': msg['id'],
+                    'id': msg.get('id'),
                     'cliente': msg.get('cliente_nome'),
-                    'telefone': msg['telefone'],
-                    'tipo': msg['tipo_mensagem'],
-                    'agendado_para': msg['agendado_para'],
+                    'telefone': msg.get('telefone'),
+                    'tipo': msg.get('tipo_mensagem'),
+                    'agendado_para': self._ensure_aware(msg.get('agendado_para')),
                     'tentativas': msg.get('tentativas', 0)
                 })
             return tarefas
@@ -974,16 +1019,16 @@ Renove agora e mantenha tudo funcionando! 👇"""
             return []
 
     def obter_proximas_execucoes(self, limit=10):
-        """Obtém próximas execuções agendadas"""
+        """Obtém próximas execuções agendadas (dados da fila)"""
         try:
-            mensagens = self.db.obter_mensagens_pendentes(limit=limit)
+            mensagens = self.db.obter_mensagens_pendentes(limit=limit) or []
             execucoes = []
             for msg in mensagens:
                 execucoes.append({
-                    'data': formatar_datetime_br(msg['agendado_para']),
-                    'tipo': msg['tipo_mensagem'],
+                    'data': formatar_datetime_br(self._ensure_aware(msg.get('agendado_para'))),
+                    'tipo': msg.get('tipo_mensagem'),
                     'cliente': msg.get('cliente_nome'),
-                    'telefone': msg['telefone']
+                    'telefone': msg.get('telefone')
                 })
             return execucoes
         except Exception as e:
@@ -996,7 +1041,7 @@ Renove agora e mantenha tudo funcionando! 👇"""
 
     # ===================== Config helpers =====================
     def _get_horario_config_global(self, chave, default='09:00'):
-        """Obtém horário configurado GLOBAL do banco ou usa padrão"""
+        """Obtém horário GLOBAL do banco ou usa padrão"""
         try:
             config = self.db.obter_configuracao(chave, chat_id_usuario=None)
             if config:
@@ -1006,7 +1051,7 @@ Renove agora e mantenha tudo funcionando! 👇"""
         return default
 
     def _get_horario_config_usuario(self, chave, chat_id_usuario, default='09:00'):
-        """Obtém horário configurado POR USUÁRIO ou usa global como fallback"""
+        """Obtém horário POR USUÁRIO ou usa global como fallback"""
         try:
             config = self.db.obter_configuracao(chave, chat_id_usuario=chat_id_usuario)
             if config:
