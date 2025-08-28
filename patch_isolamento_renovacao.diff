@@ -1,0 +1,143 @@
+*** PATCH: Isolamento por usuário + Reagendamento após renovação ***
+
+1) Passe o chat_id do usuário para o DB quando registrar envios via wrapper:
+
+--- a/bot_complete.py
++++ b/bot_complete.py
+@@
+-def registrar_envio(self, cliente_id, template_id, telefone, mensagem, tipo_envio, sucesso, message_id=None, erro=None):
++def registrar_envio(self, cliente_id, template_id, telefone, mensagem, tipo_envio, sucesso, message_id=None, erro=None, chat_id_usuario=None):
+     """Registra envio no log com fallback para Railway"""
+     try:
+-        if self.db and hasattr(self.db, 'registrar_envio'):
+-            self.db.registrar_envio(cliente_id, template_id, telefone, mensagem, tipo_envio, sucesso, message_id, erro)
++        if self.db and hasattr(self.db, 'registrar_envio'):
++            # Tenta com chat_id_usuario se o método suportar
++            try:
++                self.db.registrar_envio(cliente_id, template_id, telefone, mensagem, tipo_envio, sucesso, message_id, erro, chat_id_usuario=chat_id_usuario)
++            except TypeError:
++                self.db.registrar_envio(cliente_id, template_id, telefone, mensagem, tipo_envio, sucesso, message_id, erro)
+         elif self.db and hasattr(self.db, 'log_message'):
+             self.db.log_message(cliente_id, template_id, telefone, mensagem, sucesso, erro)
+         else:
+             logger.info(f"[RAILWAY] Log de envio (método não encontrado): cliente={cliente_id}, sucesso={sucesso}")
+@@
+-    def registrar_envio(self, cliente_id, template_id, telefone, mensagem, tipo_envio, sucesso, message_id=None, erro=None):
++    def registrar_envio(self, cliente_id, template_id, telefone, mensagem, tipo_envio, sucesso, message_id=None, erro=None, chat_id_usuario=None):
+
+2) Garanta que as chamadas ao wrapper passem o chat_id do usuário:
+   Procure por: `self.registrar_envio(` e adicione `, chat_id_usuario=chat_id` no final dos argumentos.
+
+Exemplo:
+- self.registrar_envio(..., sucesso=True, message_id=resultado.get('messageId'))
++ self.registrar_envio(..., sucesso=True, message_id=resultado.get('messageId'), chat_id_usuario=chat_id)
+
+3) Substitua a função de exibição da fila por uma versão isolada por usuário:
+
+--- a/bot_complete.py
++++ b/bot_complete.py
+@@
+-def mostrar_fila_mensagens(self, chat_id):
+-    """Mostra fila de mensagens agendadas com botões por cliente"""
+-    ...
++def mostrar_fila_mensagens(self, chat_id):
++    """Mostra fila de mensagens agendadas (isolada por usuário, admin vê tudo)."""
++    try:
++        mensagens = []
++        if self.db:
++            try:
++                if self.is_admin(chat_id):
++                    try:
++                        mensagens = self.db.obter_todas_mensagens_fila(limit=50)
++                    except Exception:
++                        mensagens = self.db.obter_mensagens_pendentes(limit=50)
++                else:
++                    try:
++                        mensagens = self.db.obter_todas_mensagens_fila(limit=50, chat_id_usuario=chat_id)
++                    except TypeError:
++                        try:
++                            mensagens = self.db.obter_mensagens_pendentes(limit=50, chat_id_usuario=chat_id)
++                        except TypeError:
++                            mensagens = self.db.obter_todas_mensagens_fila(limit=200)
++            except Exception as e:
++                logger.warning(f"Falha ao buscar fila no DB: {e}")
++        if not mensagens and hasattr(self, 'scheduler') and self.scheduler:
++            try:
++                mensagens = self.scheduler.obter_fila_mensagens()
++            except Exception as e:
++                logger.warning(f"Falha ao buscar fila no scheduler: {e}")
++                mensagens = []
++        mensagens = list(mensagens or [])
++        if not self.is_admin(chat_id):
++            allowed_ids = set()
++            try:
++                user_clientes = self.db.listar_clientes(apenas_ativos=False, chat_id_usuario=chat_id) or []
++                allowed_ids = {c.get('id') for c in user_clientes if isinstance(c, dict) and c.get('id') is not None}
++            except Exception:
++                allowed_ids = set()
++            def dono_ok(item):
++                if not isinstance(item, dict):
++                    return False
++                if item.get('chat_id_usuario') == chat_id:
++                    return True
++                if item.get('cliente_chat_id_usuario') == chat_id:
++                    return True
++                cid = item.get('cliente_id')
++                return cid in allowed_ids if cid is not None else False
++            mensagens = [m for m in mensagens if dono_ok(m)]
++        def when(x):
++            try:
++                return x.get('agendado_para') or x.get('data') or ''
++            except Exception:
++                return ''
++        mensagens.sort(key=when)
++        if not mensagens:
++            mensagem = ("📋 *FILA DE MENSAGENS*\n\n"
++                        "🟢 Fila vazia para este usuário.\n\n"
++                        "💡 As mensagens são criadas todos os dias às 05:00 (e também no bootstrap/backfill)." )
++            inline_keyboard = [[{'text': '🔄 Atualizar', 'callback_data': 'atualizar_fila'}],
++                               [{'text': '🔙 Voltar Agendador', 'callback_data': 'agendador_menu'}]]
++            self.send_message(chat_id, mensagem, parse_mode='Markdown', reply_markup={'inline_keyboard': inline_keyboard})
++            return
++        linhas = ["📋 *FILA DE MENSAGENS PENDENTES*"]
++        for item in mensagens[:12]:
++            alvo = item.get('agendado_para') or '—'
++            cli = item.get('cliente_nome') or '—'
++            tel = item.get('telefone') or '—'
++            tipo = item.get('tipo_mensagem') or item.get('tipo') or '—'
++            iid = item.get('id', '—')
++            linhas.append(f"⏰ {alvo}\n👤 {cli}\n📱 {tel}\n📄 {tipo}\n🆔 ID: {iid}\n")
++        if len(mensagens) > 12:
++            linhas.append(f"... e mais {len(mensagens)-12} mensagens")
++        inline_keyboard = [[{'text': '🔄 Atualizar', 'callback_data': 'atualizar_fila'}],
++                           [{'text': '🔙 Voltar Agendador', 'callback_data': 'agendador_menu'}]]
++        self.send_message(chat_id, "\n".join(linhas), parse_mode='Markdown', reply_markup={'inline_keyboard': inline_keyboard})
++    except Exception as e:
++        logger.error(f"Erro ao mostrar fila: {e}")
++        self.send_message(chat_id, "❌ Erro ao carregar fila de mensagens.")
+
+4) Após atualizar o vencimento nas rotas de renovação, cancele a fila e re-agende (se existir o método):
+   Procure pelos trechos com:
+       if self.scheduler:
+           mensagens_canceladas = self.scheduler.cancelar_mensagens_cliente_renovado(cliente_id)
+           logger.info(...)
+       else:
+           logger.warning(...)
+   Substitua por:
+       if self.scheduler:
+           mensagens_canceladas = self.scheduler.cancelar_mensagens_cliente_renovado(cliente_id)
+           logger.info(f"Cliente {cliente['nome']} renovado: {mensagens_canceladas} mensagens canceladas da fila")
+           # Reagendar mensagens a partir do estado atual do cliente
+           try:
+               if hasattr(self.scheduler, 'agendar_mensagens_cliente'):
+                   self.scheduler.agendar_mensagens_cliente(cliente_id)
+           except Exception as e:
+               logger.warning(f"Falha ao re-agendar mensagens do cliente {cliente_id}: {e}")
+       else:
+           logger.warning("Scheduler não disponível para cancelar mensagens")
+
+5) Logs de envios (flex): já existem chamadas a `db.obter_logs_envios(chat_id_usuario=chat_id)` no `mostrar_logs_baileys`. Se ainda houver telas que exibem envios sem filtro, aplique o mesmo padrão:
+   - Tentar filtrar no banco passando `chat_id_usuario=chat_id`
+   - Se o método não aceitar, filtrar em memória validando `log['chat_id_usuario']` ou resolvendo via `cliente_id -> db.buscar_cliente_por_id(...).chat_id_usuario`.
+
+*** FIM DO PATCH ***
